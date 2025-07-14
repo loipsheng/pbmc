@@ -2,8 +2,6 @@
 
 This repository contains the prototype research code for PBMC, a pseudo-boolean model counter. 
 
-*Note: This is research prototype code, not intended to be production quality, use at own risk.*
-
 PBMC is built on top of GPMC and RoundingSat. 
 
 ## Setting up
@@ -45,12 +43,12 @@ PBMC expects input format to follow the .opb format, an example is as follows:
 PBMC has prototype support for projected PB model counting instances. Specify the projection set variables using the following:
 ```
 * #variable= 3 #constraint= 2
-* p show 1 2 0
+* p show 3 0
 *
-+2 x1 -3 x2 +4 ~x3 >= 4;
++2 x1 +3 x2 +4 ~x3 >= 4;
 +1 x1 +1 x2 = 1;
 ```
-To indicate that the projection set consists of variables `x1` and `x2`.
+To indicate that the projection set consists of one variabl, `x3`.
 
 To run PBMC on projected model counting use:
 ```

@@ -48,7 +48,7 @@ PBMC has prototype support for projected PB model counting instances. Specify th
 +2 x1 +3 x2 +4 ~x3 >= 4;
 +1 x1 +1 x2 = 1;
 ```
-To indicate that the projection set consists of one variabl, `x3`.
+To indicate that the projection set consists of one variable, `x3`.
 
 To run PBMC on projected model counting use:
 ```

@@ -1,0 +1,19 @@
+# Local benchmark datasets and archives.
+# Keep them on disk, but do not store multi-gigabyte experiment data in Git.
+/benchmarks/
+
+# CMake/Make build products.
+/build/
+/build-debug/
+/bin/
+/bin-debug/
+
+# Upstream repositories downloaded by setup-complete-code.sh.
+/temp-source-clones/
+
+# Common compiler and editor artifacts.
+*.o
+*.a
+*.so
+*.swp
+*~

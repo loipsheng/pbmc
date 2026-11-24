@@ -238,6 +238,13 @@ benchmarks/cost-graph/       1500 个 cost-aware Sensor placement 实例
 
 ## 11. 源码结构与修改位置
 
+如果准备开始阅读、修改递归简化、根预处理器或变量启发式，先阅读：
+
+- [PBMC 当前代码连接架构与递归简化接入指南](PBMC_CURRENT_ARCHITECTURE_CN.md)
+- [PBMC 代码框架与四个改进模块开发指南](PBMC_CODE.md)
+- [PBMC 无权精确模型计数简化技术与冲突学习指南](PBMC_SIMPLIFICATION.md)
+- [PBMC 文件与目录逐项说明](PBMC_FILE_AND_DIRECTORY_GUIDE_CN.md)
+
 主要目录：
 
 ```text

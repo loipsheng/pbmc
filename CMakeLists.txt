@@ -33,7 +33,7 @@ add_subdirectory(flow-cutter-pace17)
 add_subdirectory(roundingsat)
 
 add_library(pbmc STATIC 
-	core/ComponentCache.cc core/ComponentManager.cc core/Counter.cc
+	core/ComponentCache.cc core/ComponentManager.cc core/Counter.cc core/simplify.cc
 	core/Config.cc core/Instance.cc ddnnf/DecisionTree.cc
 	core/Solver.cc 
 	utils/Options.cc utils/System.cc
@@ -50,3 +50,41 @@ add_executable(pbmc-bin core/Main.cc)
 set_target_properties(pbmc-bin PROPERTIES OUTPUT_NAME pbmc)
 
 target_link_libraries(pbmc-bin pbmc roundingsat flowcutter z mpfr gmp gmpxx $<$<BOOL:${PBMC_STATIC_BUILD}>:-static>)
+
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(equality-metadata-test tests/inprocessing/equality_metadata_test.cc)
+  target_link_libraries(equality-metadata-test gmp gmpxx)
+  add_test(NAME gate_0e_equality_metadata COMMAND equality-metadata-test)
+
+  add_executable(equality-gc-test tests/inprocessing/equality_gc_test.cc)
+  target_link_libraries(equality-gc-test
+    pbmc roundingsat flowcutter z mpfr gmp gmpxx
+  )
+  add_test(NAME gate_0e_equality_gc COMMAND equality-gc-test)
+
+  add_executable(simplify-result-test tests/inprocessing/simplify_result_test.cc)
+  add_test(NAME gate_1_simplify_result COMMAND simplify-result-test)
+
+  find_package(PythonInterp 3 QUIET)
+  if(PYTHONINTERP_FOUND)
+    add_test(
+      NAME gate_0b_exact_mc
+      COMMAND ${PYTHON_EXECUTABLE}
+              ${CMAKE_CURRENT_SOURCE_DIR}/tests/inprocessing/run_gate_0b.py
+              --solver $<TARGET_FILE:pbmc-bin>
+    )
+    add_test(
+      NAME gate_0e_operator_equality
+      COMMAND ${PYTHON_EXECUTABLE}
+              ${CMAKE_CURRENT_SOURCE_DIR}/tests/inprocessing/run_gate_0e.py
+              --solver $<TARGET_FILE:pbmc-bin>
+    )
+    add_test(
+      NAME gate_1_empty_simplifier
+      COMMAND ${PYTHON_EXECUTABLE}
+              ${CMAKE_CURRENT_SOURCE_DIR}/tests/inprocessing/run_gate_1.py
+              --solver $<TARGET_FILE:pbmc-bin>
+    )
+  endif()
+endif()

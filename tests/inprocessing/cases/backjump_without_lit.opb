@@ -1,0 +1,10 @@
+* #variable= 6 #constraint= 8
+* exact MC: 19; -vs=0 -bjthd=0.99 covers ResolveWithoutLit -> bjResolve
++1 ~x3 +1 x4 +1 x6 >= 1 ;
++1 ~x1 +1 x2 +1 x6 >= 1 ;
++1 ~x2 +1 ~x4 +1 ~x5 +1 ~x6 >= 1 ;
++1 ~x3 +1 ~x4 +1 ~x6 >= 1 ;
++1 x2 +1 x3 +1 x5 >= 1 ;
++1 x1 +1 ~x6 >= 1 ;
++1 ~x1 +1 x2 +1 ~x5 >= 1 ;
++1 ~x1 +1 x3 +1 ~x4 >= 1 ;

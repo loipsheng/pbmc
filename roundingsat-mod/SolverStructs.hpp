@@ -39,6 +39,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #pragma once
 
+#include <cstddef>
 #include <ostream>
 #include "typedefs.hpp"
 
@@ -76,23 +77,36 @@ struct Watch {
 // ---------------------------------------------------------------------
 // Memory. Maximum supported size of learnt constraint database is 16GB
 
+class OutOfMemoryException {};
+
 struct ConstraintAllocator {
   uint32_t* memory = nullptr;  // TODO: why not uint64_t?
   uint32_t at = 0, cap = 0;
   uint32_t wasted = 0;  // for GC
   void capacity(uint32_t min_cap);
+  static constexpr size_t alignmentWords() {
+    return (alignof(std::max_align_t) + sizeof(uint32_t) - 1) /
+           sizeof(uint32_t);
+  }
+  static size_t alignedWordSize(size_t words) {
+    const size_t alignment = alignmentWords();
+    return ((words + alignment - 1) / alignment) * alignment;
+  }
   template <typename C>
   C* alloc(int nTerms) {
     uint32_t oldAt = at;
-    at += C::getMemSize(nTerms);
+    const size_t words = alignedWordSize(C::getMemSize(nTerms));
+    if (words > std::numeric_limits<uint32_t>::max() - at)
+      throw OutOfMemoryException();
+    at += static_cast<uint32_t>(words);
     capacity(at);
+    assert(reinterpret_cast<uintptr_t>(memory + oldAt) % alignof(C) == 0);
     return (C*)(memory + oldAt);
   }
   Constr& operator[](CRef cr) { return (Constr&)*(memory + cr.ofs); }
   const Constr& operator[](CRef cr) const { return (Constr&)*(memory + cr.ofs); }
 };
 
-class OutOfMemoryException {};
 static inline void* xrealloc(void* ptr, size_t size) {
   void* mem = realloc(ptr, size);
   if (mem == NULL && errno == ENOMEM)

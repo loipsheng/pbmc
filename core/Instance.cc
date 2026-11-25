@@ -12,6 +12,7 @@ Use of this source code is governed by an MIT-style license that can be found in
 #include <fstream>
 #include <vector>
 #include <algorithm>
+#include <limits>
 
 using namespace Glucose;
 using namespace GPMC;
@@ -47,6 +48,26 @@ static void Tokens(string buf, vector<string>& ret) {
 		}
 	}
 	if (ret.back().empty()) ret.pop_back();
+}
+
+static Int checkedLong(const mpz_class& value, const char* operation) {
+	static const mpz_class min_value(std::numeric_limits<Int>::min());
+	static const mpz_class max_value(std::numeric_limits<Int>::max());
+	if (value < min_value || value > max_value)
+		throw std::invalid_argument(std::string("integer overflow while ") + operation);
+	return value.get_si();
+}
+
+static Int checkedNeg(Int value, const char* operation) {
+	return checkedLong(-mpz_class(value), operation);
+}
+
+static Int checkedAdd(Int left, Int right, const char* operation) {
+	return checkedLong(mpz_class(left) + mpz_class(right), operation);
+}
+
+static Int checkedSub(Int left, Int right, const char* operation) {
+	return checkedLong(mpz_class(left) - mpz_class(right), operation);
 }
 
 template <class T_data>
@@ -429,6 +450,7 @@ void PBInstance<T_data>::load(istream& in, bool weighted, bool projected, bool k
 	bool typeSpecified = false;
 	npvars = 0;
 	int ncls = 0;
+	SourceRowID source_row = 0;
 	ispvars.clear();
 
 	// //debug print
@@ -505,6 +527,7 @@ void PBInstance<T_data>::load(istream& in, bool weighted, bool projected, bool k
 			}
 		} else { // Read clause/constraint
 			bool prevIsCoeff = false;
+			bool upperBound = false;
 			std::string currentToken;
 			PBconstraint currentConstraint;
 			int lit = 0;
@@ -516,6 +539,13 @@ void PBInstance<T_data>::load(istream& in, bool weighted, bool projected, bool k
 				tokens.pop_back(); // removing ";" at end of token vector
 			}
 			int numTokens = tokens.size();
+			int comparatorCount = 0;
+			for (const std::string& token : tokens)
+				if (token == ">=" || token == "<=" || token == "=") comparatorCount++;
+			if (numTokens < 2 || comparatorCount != 1 ||
+					(tokens[numTokens - 2] != ">=" && tokens[numTokens - 2] != "<=" &&
+					 tokens[numTokens - 2] != "="))
+				throw std::invalid_argument("malformed PB row: expected one comparator and a right-hand side");
 			for (int i = 0; i < numTokens; i++) {
 				currentToken = tokens.at(i);
 				if (i == numTokens - 1 ) {
@@ -527,12 +557,17 @@ void PBInstance<T_data>::load(istream& in, bool weighted, bool projected, bool k
 						currentConstraint.rhs = std::stol(currentToken.substr(0, currentToken.size() - 1));
 					}
 				} else if (i == numTokens - 2) {
-					// parsing constraint operator
-					// second last word, should be the constraint comparator = or >=
+					// Internally every non-equality row is represented as >=.
 					if (tokens.at(i) == "=") {
 						currentConstraint.equals = true;
-					} else {
+					} else if (tokens.at(i) == ">=") {
 						currentConstraint.equals = false;
+					} else if (tokens.at(i) == "<=") {
+						currentConstraint.equals = false;
+						upperBound = true;
+					} else {
+						throw std::invalid_argument(
+								"unsupported PB comparator: " + tokens.at(i));
 					}
 				} else {
 					if(currentToken.at(0) == 'x') {
@@ -566,7 +601,28 @@ void PBInstance<T_data>::load(istream& in, bool weighted, bool projected, bool k
 					}
 				}
 			}
-			currentConstraint.constraintId = clauses.size() + 1; // 1 indexed id for constraint parsing
+			if (currentConstraint.lits.size() != currentConstraint.coeffs.size())
+				throw std::invalid_argument("malformed PB row: coefficient without literal");
+
+			// Zero terms are semantically irrelevant and cannot enter the positive
+			// coefficient normalizer (which deliberately requires nonzero terms).
+			PBconstraint withoutZeros;
+			withoutZeros.rhs = currentConstraint.rhs;
+			withoutZeros.equals = currentConstraint.equals;
+			for (size_t i = 0; i < currentConstraint.coeffs.size(); ++i) {
+				if (currentConstraint.coeffs[i] == 0) continue;
+				withoutZeros.coeffs.push_back(currentConstraint.coeffs[i]);
+				withoutZeros.lits.push_back(currentConstraint.lits[i]);
+			}
+			currentConstraint = std::move(withoutZeros);
+
+			if (upperBound) {
+				for (Int& coeff : currentConstraint.coeffs)
+					coeff = checkedNeg(coeff, "canonicalizing <= coefficient");
+				currentConstraint.rhs = checkedNeg(
+						currentConstraint.rhs, "canonicalizing <= right-hand side");
+			}
+			currentConstraint.constraintId = ++source_row;
 			// for(auto token : tokens) {
 			// 	lit = stoi(token);
 			// 	if(lit == 0) break;
@@ -616,9 +672,11 @@ template <class T_data>
 bool PBInstance<T_data>::addClause(PBconstraint& parsedConstraint, bool learnt) {
 	// consider doing more checks here?
 	if (parsedConstraint.lits.size() == 0) {
-		// no literals, unsat
-		unsat = true;
-		return false;
+		const bool satisfied = parsedConstraint.equals
+				? parsedConstraint.rhs == 0
+				: parsedConstraint.rhs <= 0;
+		if (!satisfied) unsat = true;
+		return true;
 	}
 	// do we want to do something with unit constraints?
 	// do not really need to sort the parsedConstraint since this is temporary and will get sorted in constraint allocator later on
@@ -849,6 +907,7 @@ PBconstraint PBInstance<T_data>::getRenumConstraint(PBconstraint& origConstraint
 template <class T_data>
 void PBInstance<T_data>::renumberVar() {
 	std::unordered_map<int, int> origToNewVarMap; // can do this because var is defined as int
+	renumberedClauses.clear();
 	assert(npvars == pvars.size());
 	int pcount = 1;
 	int nonpcount = npvars + 1;
@@ -917,7 +976,10 @@ void PBInstance<T_data>::computeVarCoeffScore(double maxCoeffScore, bool alterna
 	for (PBconstraint& C : renumberedClauses) {
 		assert(C.lits.size() == C.coeffs.size());
 		for (int i = 0; i < C.lits.size(); i++) {
-			double cvarScore = (double) std::abs(C.coeffs[i]) / (double) std::abs(C.rhs);
+			const double numerator = std::abs(static_cast<double>(C.coeffs[i]));
+			const double denominator = std::abs(static_cast<double>(C.rhs));
+			double cvarScore = denominator == 0.0
+					? 1.0 : numerator / denominator;
 			cvarScore = std::min(1.0, cvarScore); // ceil at 1.0
 			// varCoeffScoreVec[std::abs(C.lits[i])].push_back(cvarScore);
 			varCoeffScoreVec.at(std::abs(C.lits[i]) -1).push_back(cvarScore); //offset by 1 for variable 0
@@ -1033,9 +1095,13 @@ PBconstraint PBInstance<T_data>::getPositiveCoeffRenumberedConstraint(PBconstrai
 		assert(origConstraint.coeffs[i] != 0);
 		if (origConstraint.coeffs[i] < 0) {
 			// if coeff -ve, then flip coeff, adjust literal and rhs
-			allPositiveConstraint.rhs -= origConstraint.coeffs[i];
+			const Int positiveCoeff = checkedNeg(
+					origConstraint.coeffs[i], "normalizing negative coefficient");
+			allPositiveConstraint.rhs = checkedAdd(
+					allPositiveConstraint.rhs, positiveCoeff,
+					"normalizing PB right-hand side");
 			allPositiveConstraint.lits.push_back(-origConstraint.lits[i]);
-			allPositiveConstraint.coeffs.push_back(-origConstraint.coeffs[i]);
+			allPositiveConstraint.coeffs.push_back(positiveCoeff);
 		} else {
 			allPositiveConstraint.lits.push_back(origConstraint.lits[i]);
 			allPositiveConstraint.coeffs.push_back(origConstraint.coeffs[i]);
@@ -1117,7 +1183,9 @@ void PBInstance<T_data>::simplifyRenumberedConstraint() {
 						if (!currentInferredAssignment.at(currentVar) && (this->renumberedClauses.at(i).lits.at(j) > 0)) {
 							appliedValue = 0;
 						}
-						updatedRhs -= appliedValue;
+						updatedRhs = checkedSub(
+								updatedRhs, appliedValue,
+								"applying inferred PB assignment");
 						hasAssign = true;
 					}
 					updatedConstraint.rhs = updatedRhs;
@@ -1148,54 +1216,24 @@ void PBInstance<T_data>::simplifyRenumberedConstraint() {
 
 template <class T_data>
 void PBInstance<T_data>::inferAssignment(PBconstraint &constraint, std::unordered_map<rs::Var, bool> &inferredAssignmentMap) {
-	// assumption is that constraint is sorted according to descending order of coeff, meaning constraint.coeff[0] is the largest coeff. Done in getPositiveCoeffRenumberedConstraint.
-	double normConsVal = (double) constraint.rhs / (double) constraint.coeffs.at(0);
+	// This is called after positive-coefficient normalization.
+	const Int coeff = constraint.coeffs.at(0);
+	const Int rhs = constraint.rhs;
+	const Int lit = constraint.lits.at(0);
+	assert(coeff > 0);
 	if (constraint.equals) {
-		if (normConsVal > 1.0) {
-			this->inferredUnsat = true;
+		if (rhs == coeff) {
+			addCheckInferredAssign(lit, inferredAssignmentMap);
+		} else if (rhs == 0) {
+			addCheckInferredAssign(-lit, inferredAssignmentMap);
 		} else {
-			if (constraint.lits.at(0) > 0 && normConsVal == 1) {
-				addCheckInferredAssign(std::abs(constraint.lits.at(0)), inferredAssignmentMap);
-			} else if (constraint.lits.at(0) > 0 && normConsVal == 0) {
-				addCheckInferredAssign(-std::abs(constraint.lits.at(0)), inferredAssignmentMap);
-			} else if (constraint.lits.at(0) < 0 && normConsVal == 1) {
-				addCheckInferredAssign(-std::abs(constraint.lits.at(0)), inferredAssignmentMap);
-			} else if (constraint.lits.at(0) < 0 && normConsVal == 0) {
-				addCheckInferredAssign(std::abs(constraint.lits.at(0)), inferredAssignmentMap);
-			} else {
-				this->inferredUnsat = true;
-			}
+			this->inferredUnsat = true;
 		}
 	} else {
-		// unit clause not equals so >=
-		if (normConsVal > 1.0 && constraint.coeffs.at(0) > 0) {
-			// remains as >= after division
+		if (rhs > coeff) {
 			this->inferredUnsat = true;
-		} else if (normConsVal < 0.0 && constraint.coeffs.at(0) < 0) {
-			// <= after division
-			this->inferredUnsat = true;
-		} else {
-			if (constraint.coeffs.at(0) > 0) {
-				// >=
-				if (constraint.lits.at(0) > 0 && normConsVal > 0) { 
-					addCheckInferredAssign(std::abs(constraint.lits.at(0)), inferredAssignmentMap);
-				} else if (constraint.lits.at(0) < 0 && normConsVal > 0) {
-					addCheckInferredAssign(-std::abs(constraint.lits.at(0)), inferredAssignmentMap);
-				} else {
-					// cannot infer anything, so redundant unit clause can just ignore
-					;
-				}
-			} else {
-				// <= after division
-				if (constraint.lits.at(0) < 0 && normConsVal < 1.0){ 
-					addCheckInferredAssign(std::abs(constraint.lits.at(0)), inferredAssignmentMap);
-				} else if (constraint.lits.at(0) > 0 && normConsVal < 1.0) {
-					addCheckInferredAssign(-std::abs(constraint.lits.at(0)), inferredAssignmentMap);
-				} else {
-					// cannot infer anything, so redundant unit clause can just ignore
-					;
-				}
-			}
+		} else if (rhs > 0) {
+			addCheckInferredAssign(lit, inferredAssignmentMap);
 		}
 	}
 	return;
@@ -1244,7 +1282,9 @@ PBconstraint PBInstance<T_data>::applyProbe(const PBconstraint &constraint, Int 
 			probeCoeffs.push_back(constraint.coeffs.at(i));
 		} else {
 			if (constraint.lits.at(i) == decLit) {
-				probeRhs -= constraint.coeffs.at(i);
+				probeRhs = checkedSub(
+						probeRhs, constraint.coeffs.at(i),
+						"applying PB probe assignment");
 			}
 		}
 	}
@@ -1259,52 +1299,28 @@ std::pair<Int, bool> PBInstance<T_data>::inferProbe(PBconstraint &constraint) {
 	// should be unit clause here
 	bool isSat = true;
 	Int inferredLit = 0;
+	if (constraint.lits.empty()) {
+		isSat = constraint.equals ? constraint.rhs == 0 : constraint.rhs <= 0;
+		return std::make_pair(inferredLit, isSat);
+	}
 
-	double normConsVal = (double) constraint.rhs / (double) constraint.coeffs.at(0);
+	const Int coeff = constraint.coeffs.at(0);
+	const Int rhs = constraint.rhs;
+	const Int lit = constraint.lits.at(0);
+	assert(coeff > 0);
 	if (constraint.equals) {
-		if (normConsVal > 1.0) {
-			isSat = false;
+		if (rhs == coeff) {
+			inferredLit = lit;
+		} else if (rhs == 0) {
+			inferredLit = -lit;
 		} else {
-			if (constraint.lits.at(0) > 0 && normConsVal == 1) {
-				inferredLit = std::abs(constraint.lits.at(0));
-			} else if (constraint.lits.at(0) > 0 && normConsVal == 0) {
-				inferredLit = -std::abs(constraint.lits.at(0));
-			} else if (constraint.lits.at(0) < 0 && normConsVal == 1) {
-				inferredLit = -std::abs(constraint.lits.at(0));
-			} else if (constraint.lits.at(0) < 0 && normConsVal == 0) {
-				inferredLit = std::abs(constraint.lits.at(0));
-			} else {
-				isSat = false;
-			}
+			isSat = false;
 		}
 	} else {
-		// unit clause not equals so >=
-		if (normConsVal > 1.0 && constraint.coeffs.at(0) > 0) {
+		if (rhs > coeff) {
 			isSat = false;
-		} else if (normConsVal < 0.0 && constraint.coeffs.at(0) < 0) {
-			isSat = false;
-		} else {
-			if (constraint.coeffs.at(0) > 0) {
-				// >=
-				if (constraint.lits.at(0) > 0 && normConsVal > 0){ 
-					inferredLit = std::abs(constraint.lits.at(0));
-				} else if (constraint.lits.at(0) < 0 && normConsVal > 0) {
-					inferredLit = -std::abs(constraint.lits.at(0));
-				} else {
-					// cannot infer
-					inferredLit = 0;
-				}
-			} else {
-				// <= after division
-				if (constraint.lits.at(0) < 0 && normConsVal < 1.0){ 
-					inferredLit = std::abs(constraint.lits.at(0));
-				} else if (constraint.lits.at(0) > 0 && normConsVal < 1.0) {
-					inferredLit = -std::abs(constraint.lits.at(0));
-				} else {
-					// cannot infer
-					inferredLit = 0;
-				}
-			}
+		} else if (rhs > 0) {
+			inferredLit = lit;
 		}
 	}
 	return std::make_pair(inferredLit, isSat);

@@ -8,6 +8,8 @@ Use of this source code is governed by an MIT-style license that can be found in
 #include "mtl/Sort.h"
 #include <utility>
 #include <limits.h>
+#include <stdexcept>
+#include <unordered_map>
 
 using namespace GPMC;
 
@@ -81,9 +83,23 @@ void ComponentManager<T_data>::init(int nvars, int npvars, const vec<CRef>& scla
 #define CACHE
 
 template <typename T_data>
-void ComponentManager<T_data>::init(int nvars, int npvars, const vector<rs::CRef>& sconstraints, const rs::ConstraintAllocator& sca) {
+void ComponentManager<T_data>::init(int nvars, int npvars,
+		const vector<rs::CRef>& sconstraints, const rs::ConstraintAllocator& sca,
+		const vector<RowInfo>& rows) {
 	vec< vec<Var> > binlinks(nvars);
 	vec< vec<ClID> > occ(nvars); // using clid here because rs::ID is unsigned and we use negative values as seperator values
+	unordered_map<uint64_t, RowVersionID> versions;
+	row_binds_.clear();
+	for (const RowInfo& row : rows) {
+		if (row.state == RowState::ROOT_TRUE) {
+			if (row.solver_id != NO_SOLVER_ID)
+				throw logic_error("ROOT_TRUE row unexpectedly has a solver ID");
+			continue;
+		}
+		if (row.version == NO_ROW_VERSION || row.solver_id == NO_SOLVER_ID ||
+				!versions.emplace(row.solver_id, row.version).second)
+			throw logic_error("invalid or duplicate attached row identity");
+	}
 
 	occlists_.growTo(nvars); 
 	var_frequency_.growTo(nvars);
@@ -99,12 +115,27 @@ void ComponentManager<T_data>::init(int nvars, int npvars, const vector<rs::CRef
 		// now to attach the expanded constraint to the component manager constraint allocator
 		rs::CRef comp_cr = ce->toConstr(pbca_, true, comp_cr_id); // write the constraint into component manager constraint allocator
 		constraints_.push_back(comp_cr);
+		auto version = versions.find(C.id);
+		if (version != versions.end()) {
+			ComponentBind binding;
+			binding.version = version->second;
+			binding.clid = static_cast<ClID>(constraints_.size() - 1);
+			binding.cref = comp_cr;
+			if (!row_binds_.emplace(binding.version, binding).second)
+				throw logic_error("duplicate ComponentManager row binding");
+		}
 		// still need to fill up the var_frequency_ and occ
 		for (size_t j = 0; j < C.size(); j++) {
 			var_frequency_[rs::toVar(C.lit(j))-1]++;
 			occ[rs::toVar(C.lit(j))-1].push(constraints_.size()-1); 
 		}
 		bits_of_weights_[i] = (unsigned int) ceil(log((double) C.degree()) / log(2.0));
+	}
+	for (const RowInfo& row : rows) {
+		if (row.state == RowState::ATTACHED && !hasRowBind(row.version))
+			throw logic_error("attached row is missing its ComponentManager binding");
+		if (row.state == RowState::ROOT_TRUE && hasRowBind(row.version))
+			throw logic_error("ROOT_TRUE row unexpectedly has a ComponentManager binding");
 	}
 
 	occ_pool_.clear();
@@ -145,6 +176,31 @@ void ComponentManager<T_data>::init(int nvars, int npvars, const vector<rs::CRef
 	num_try_split = 0;
 }
 // end of init for roundingsat pb data structures
+
+template <typename T_data>
+bool ComponentManager<T_data>::hasRowBind(RowVersionID version) const {
+	return row_binds_.find(version) != row_binds_.end();
+}
+
+template <typename T_data>
+const ComponentBind& ComponentManager<T_data>::rowBind(RowVersionID version) const {
+	auto found = row_binds_.find(version);
+	if (found == row_binds_.end())
+		throw logic_error("unknown row version in ComponentManager");
+	return found->second;
+}
+
+template <typename T_data>
+bool ComponentManager<T_data>::validRowBind(
+		RowVersionID version, uint64_t solver_id) const {
+	auto found = row_binds_.find(version);
+	if (found == row_binds_.end()) return false;
+	const ComponentBind& binding = found->second;
+	if (binding.clid < 0 || static_cast<size_t>(binding.clid) >= constraints_.size() ||
+			constraints_[binding.clid].ofs != binding.cref.ofs)
+		return false;
+	return pbca_[binding.cref].id == solver_id;
+}
 
 template <typename T_data>
 void ComponentManager<T_data>::initComponentStack(int nvars, int nlongcls) {

@@ -39,8 +39,6 @@ std::unordered_set<std::string> Glucose::disabled_print_name({"vs",
     "cs",
     "bj",
     "bjthd",
-    "rmvsatcl",
-    "rmvsatclthd",
     "coef",
     "natw",
     "ddnnf",
@@ -122,4 +120,3 @@ void Glucose::printUsageAndExit (int argc, char** argv, bool verbose)
 	fprintf(stderr, "\n");
 	exit(0);
 }
-

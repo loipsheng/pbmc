@@ -13,10 +13,26 @@ Use of this source code is governed by an MIT-style license that can be found in
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <algorithm>
+#include <limits>
+#include <stdexcept>
+#include <unordered_set>
 
 // using namespace rs;
 using namespace Glucose;
 using namespace GPMC;
+
+namespace {
+
+Int checkedPBInt(const rs::BigCoef& value, const char* operation) {
+	const rs::BigCoef min_value = std::numeric_limits<Int>::min();
+	const rs::BigCoef max_value = std::numeric_limits<Int>::max();
+	if (value < min_value || value > max_value)
+		throw std::invalid_argument(std::string("integer overflow while ") + operation);
+	return value.convert_to<Int>();
+}
+
+} // namespace
 
 
 /**************************************************************************************************/
@@ -43,9 +59,10 @@ PBcounter<T_data>::PBcounter(Configuration& config_) :
 , sats               (0)
 , nbackjumps         (0)
 , nbackjumps_sp      (0)
+, nbackjumps_with_lit(0)
+, nbackjumps_without_lit(0)
+, nchronological_backtracks(0)
 , reduce_dbs_pre     (0)
-, simp_dbs           (0)
-, simplify_time      (0.0)
 , npvars             (0)
 , npvars_isolated    (0)
 , limlevel           (0)
@@ -55,7 +72,6 @@ PBcounter<T_data>::PBcounter(Configuration& config_) :
 , last_lit           (0) // 0 should not be able valid lit in rs since 1 indexed 
 , gweight            (1)
 , on_bj              (config_.cntr.backjump)
-, on_simp            (config_.cntr.remove_sat_cls)
 , progress           (INIT)
 , verbosity_c        (1)
 {
@@ -147,11 +163,260 @@ bool PBcounter<T_data>::preprocess()
 }
 
 
-// NOTE: this is not called, consider moving parts to main_pbmc if needed
 template <typename T_data>
-bool PBcounter<T_data>::simplify()
+SimpResult PBcounter<T_data>::simplifyNode()
 {
+	if(!config.inprocess || config.mode != MC || config.ddnnf)
+		throw std::logic_error("recursive simplification is available only for exact MC");
+
+	simp_stats.calls++;
+	const double start = cpuTime();
+#ifndef NDEBUG
+	validateRows(true);
+#endif
+	const SimpResult result = Simplifier<T_data>::run(*this);
+	simp_stats.seconds += cpuTime() - start;
+
+	switch(result.status) {
+	case SimpStatus::UNCHANGED:
+		break;
+	case SimpStatus::IMPLIED:
+	case SimpStatus::ROW_CHANGED:
+	case SimpStatus::ROW_REMOVED:
+		simp_stats.changed++;
+		break;
+	case SimpStatus::CONFLICT:
+		simp_stats.conflicts++;
+		break;
+	case SimpStatus::BUDGET:
+		simp_stats.budgets++;
+		break;
+	}
+	return result;
+}
+
+template <typename T_data>
+rs::CeArb PBcounter<T_data>::makeCe(const PBconstraint& row) {
+	if (row.lits.size() != row.coeffs.size())
+		throw std::invalid_argument("PB row has mismatched literal and coefficient counts");
+	rs::CeArb ce = this->cePools.takeArb();
+	for (size_t i = 0; i < row.lits.size(); ++i) {
+		if (row.coeffs[i] <= 0)
+			throw std::invalid_argument("canonical PB row contains a non-positive coefficient");
+		ce->addLhs(rs::BigCoef(row.coeffs[i]), static_cast<rs::Lit>(row.lits[i]));
+	}
+	ce->addRhs(rs::BigCoef(row.rhs));
+	return ce;
+}
+
+template <typename T_data>
+PBconstraint PBcounter<T_data>::contentOf(
+		const rs::CeArb& ce, SourceRowID source) const {
+	PBconstraint result;
+	result.constraintId = static_cast<Int>(source);
+	result.rhs = checkedPBInt(ce->getDegree(), "recording canonical PB degree");
+	for (rs::Var var : ce->vars) {
+		const rs::Lit lit = ce->getLit(var);
+		if (lit == 0) continue;
+		result.lits.push_back(lit);
+		result.coeffs.push_back(
+				checkedPBInt(ce->getCoef(lit), "recording canonical PB coefficient"));
+	}
+	result.sortDescendingCoeff();
+	return result;
+}
+
+template <typename T_data>
+PBconstraint PBcounter<T_data>::contentOf(
+		const rs::Constr& constraint, SourceRowID source) const {
+	PBconstraint result;
+	result.constraintId = static_cast<Int>(source);
+	result.rhs = checkedPBInt(constraint.degree(), "recording attached PB degree");
+	for (size_t i = 0; i < constraint.size(); ++i) {
+		result.lits.push_back(constraint.lit(i));
+		result.coeffs.push_back(checkedPBInt(
+				constraint.coef(i), "recording attached PB coefficient"));
+	}
+	result.sortDescendingCoeff();
+	return result;
+}
+
+template <typename T_data>
+bool PBcounter<T_data>::addDir(const PBconstraint& row, EqualityGroupID group,
+		RowSide side, RowVersionID version, const rs::CeSuper& ce,
+		RowInfo& result) {
+	const size_t before = this->constraints.size();
+	const std::pair<rs::ID, rs::ID> added =
+			this->addConstraint(ce, rs::Origin::FORMULA);
+	if (added.second == rs::ID_Unsat) return false;
+
+	result.source = static_cast<SourceRowID>(row.constraintId);
+	result.group = group;
+	result.side = side;
+	result.version = version;
+	result.content = row;
+	result.content.equals = false;
+
+	if (added.second == rs::ID_Undef) {
+		if (this->constraints.size() != before)
+			throw std::logic_error("ROOT_TRUE PB row unexpectedly attached a constraint");
+		result.state = RowState::ROOT_TRUE;
+		result.solver_id = NO_SOLVER_ID;
+		return true;
+	}
+
+	if (this->constraints.size() != before + 1)
+		throw std::logic_error("attached PB row did not append exactly one constraint");
+	const rs::CRef cr = this->constraints.back();
+	const rs::Constr& attached = this->ca[cr];
+	if (attached.id != added.second)
+		throw std::logic_error("RoundingSat returned the wrong processed constraint ID");
+	result.state = RowState::ATTACHED;
+	result.solver_id = added.second;
+	result.content = contentOf(attached, result.source);
 	return true;
+}
+
+template <typename T_data>
+bool PBcounter<T_data>::addEq(const PBconstraint& row) {
+	const SourceRowID source = static_cast<SourceRowID>(row.constraintId);
+	const EqualityGroupID group_id = groups_.size() + 1;
+	const RowVersionID lower_version = rows_.size() + 1;
+	const RowVersionID upper_version = rows_.size() + 2;
+
+	rs::CeArb lower_ce = makeCe(row);
+	rs::CeArb upper_ce = this->cePools.takeArb();
+	lower_ce->copyTo(upper_ce);
+	upper_ce->invert();
+
+	PBconstraint lower_content = contentOf(lower_ce, source);
+	PBconstraint upper_content = contentOf(upper_ce, source);
+	RowInfo lower;
+	RowInfo upper;
+	if (!addDir(lower_content, group_id, RowSide::LOWER,
+			lower_version, lower_ce, lower))
+		return false;
+	if (!addDir(upper_content, group_id, RowSide::UPPER,
+			upper_version, upper_ce, upper))
+		return false;
+
+	EqGroup group;
+	group.id = group_id;
+	group.source = source;
+	group.lower = lower_version;
+	group.upper = upper_version;
+	group.revision = 0;
+	vector<RowInfo> staged = rows_;
+	staged.push_back(lower);
+	staged.push_back(upper);
+	if (!validGroup(group, staged))
+		throw std::logic_error("invalid equality group before publication");
+
+	rows_.push_back(std::move(lower));
+	rows_.push_back(std::move(upper));
+	groups_.push_back(group);
+	return true;
+}
+
+template <typename T_data>
+bool PBcounter<T_data>::addRows() {
+	rows_.clear();
+	groups_.clear();
+	for (const PBconstraint& original : pbins.renumberedClauses) {
+		if (original.constraintId <= 0)
+			throw std::logic_error("canonical PB row is missing its source identity");
+		if (original.equals) {
+			if (!addEq(original)) return false;
+		} else {
+			const RowVersionID version = rows_.size() + 1;
+			rs::CeArb ce = makeCe(original);
+			PBconstraint content = contentOf(
+					ce, static_cast<SourceRowID>(original.constraintId));
+			RowInfo row;
+			if (!addDir(content, NO_EQUALITY_GROUP, RowSide::SINGLE,
+					version, ce, row))
+				return false;
+			rows_.push_back(std::move(row));
+		}
+	}
+
+	vector<std::pair<rs::Var, bool>> inferred(
+			pbins.inferredAssignment.begin(), pbins.inferredAssignment.end());
+	std::sort(inferred.begin(), inferred.end(),
+			[](const auto& left, const auto& right) { return left.first < right.first; });
+	for (const auto& assignment : inferred) {
+		const rs::Lit lit = assignment.second ? assignment.first : -assignment.first;
+		if (this->addUnitConstraint(lit, rs::Origin::FORMULA).second == rs::ID_Unsat)
+			return false;
+	}
+	validateRows(false);
+	return true;
+}
+
+template <typename T_data>
+rs::CRef PBcounter<T_data>::solverRef(RowVersionID version) const {
+	const RowInfo* row = nullptr;
+	for (const RowInfo& candidate : rows_) {
+		if (candidate.version != version) continue;
+		if (row != nullptr)
+			throw std::logic_error("duplicate PB row version");
+		row = &candidate;
+	}
+	if (row == nullptr)
+		throw std::logic_error("unknown PB row version");
+	if (row->state == RowState::ROOT_TRUE) return rs::CRef_Undef;
+
+	rs::CRef result = rs::CRef_Undef;
+	for (rs::CRef cr : this->constraints) {
+		if (this->ca[cr].id != row->solver_id) continue;
+		if (result != rs::CRef_Undef)
+			throw std::logic_error("duplicate RoundingSat logical constraint ID");
+		result = cr;
+	}
+	if (result == rs::CRef_Undef)
+		throw std::logic_error("attached PB row has no live RoundingSat constraint");
+	return result;
+}
+
+template <typename T_data>
+void PBcounter<T_data>::validateRows(bool component_bound) const {
+	unordered_set<RowVersionID> versions;
+	for (const RowInfo& row : rows_) {
+		if (row.version == NO_ROW_VERSION || !versions.insert(row.version).second)
+			throw std::logic_error("invalid or duplicate PB row version");
+		const rs::CRef cr = solverRef(row.version);
+		if (row.state == RowState::ROOT_TRUE) {
+			if (cr != rs::CRef_Undef || row.solver_id != NO_SOLVER_ID)
+				throw std::logic_error("ROOT_TRUE row has an active solver binding");
+			if (component_bound && cmpmgr.hasRowBind(row.version))
+				throw std::logic_error("ROOT_TRUE row has a component binding");
+		} else {
+			if (cr == rs::CRef_Undef || this->ca[cr].id != row.solver_id)
+				throw std::logic_error("attached row has an invalid solver binding");
+			if (component_bound && !cmpmgr.validRowBind(row.version, row.solver_id))
+				throw std::logic_error("attached row has an invalid component binding");
+		}
+	}
+	for (const EqGroup& group : groups_) {
+		if (!validGroup(group, rows_))
+			throw std::logic_error("invalid published equality group");
+		if (component_bound) {
+			const RowInfo* lower = nullptr;
+			const RowInfo* upper = nullptr;
+			for (const RowInfo& row : rows_) {
+				if (row.version == group.lower) lower = &row;
+				if (row.version == group.upper) upper = &row;
+			}
+			if (lower->state == RowState::ATTACHED &&
+					upper->state == RowState::ATTACHED) {
+				const ComponentBind& lower_bind = cmpmgr.rowBind(lower->version);
+				const ComponentBind& upper_bind = cmpmgr.rowBind(upper->version);
+				if (lower_bind.clid == upper_bind.clid ||
+						lower_bind.cref == upper_bind.cref)
+					throw std::logic_error("equality directions share a component binding");
+			}
+		}
+	}
 }
 
 
@@ -401,7 +666,9 @@ void PBcounter<T_data>::count_main()
 
 	btStateT bstate = RESOLVED;
 	limlevel = 0;
-	cmpmgr.init(nVars(),nPVars(),this->constraints,this->ca);
+	validateRows(false);
+	cmpmgr.init(nVars(), nPVars(), this->constraints, this->ca, rows_);
+	validateRows(true);
 
 	for(;;) {
 		assert(!cmpmgr.topDecision().hasUnprocessedSplitComp());
@@ -462,6 +729,12 @@ void PBcounter<T_data>::count_main()
 			cDecayActivity();
 		} else {
 			// NO CONFLICT
+			if(config.inprocess) {
+				const SimpResult result = simplifyNode();
+				if(result.status != SimpStatus::UNCHANGED)
+					throw std::logic_error(
+							"Gate 1 empty simplifier returned a non-empty status");
+			}
 			assert(!cmpmgr.topDecision().hasUnprocessedSplitComp());
 
 			// SPLIT THE CURRENT COMPONENT
@@ -517,14 +790,6 @@ void PBcounter<T_data>::count_main()
 		else if(bstate == RESOLVED) continue;
 
 		assert(cmpmgr.topComponent().hasPVar());
-
-		if (on_simp && decisionLevel() <= limlevel && cmpmgr.checkfixedDL() && !simplify()) {
-			cmpmgr.topDecision().increaseModels((T_data)0, false);
-			if(config.ddnnf) cmpmgr.addNode(BOTTOM_NODE);
-			bstate = backtrack();
-			if(bstate == EXIT) break;
-			else { assert(false); abort(); }
-		}
 
 		// cleanup from rs solver
 		if (rs::stats.NCONFL >= (rs::stats.NCLEANUP + 1) * nconfl_to_reduce) {
@@ -653,6 +918,7 @@ inline btStateT PBcounter<T_data>::Resolve(int bk_level, rs::CRef cr, rs::Lit li
 	bool canjump = on_bj && level+1 < decisionLevel() && (double)level/decisionLevel() < config.bj_threshold;
 	if(canjump) {
 		nbackjumps++;
+		nbackjumps_with_lit++;
 		bjResolve(level);
 		if(cr != rs::CRef_Undef) {
 			uncheckedEnqueue(lit, cr);
@@ -683,6 +949,7 @@ inline btStateT PBcounter<T_data>::ResolveWithoutLit(int bk_level, rs::CeSuper& 
 	bool canjump = on_bj && level+1 < decisionLevel() && (double)level/decisionLevel() < config.bj_threshold;
 	if(canjump) {
 		nbackjumps++;
+		nbackjumps_without_lit++;
 		bjResolve(level);
 		// backjump done, so we can add constraint to ca
 		rs::CRef cr = attachConstraint(constraint, false);
@@ -710,6 +977,7 @@ template <typename T_data>
 btStateT PBcounter<T_data>::backtrack() {
 	if (decisionLevel() == 0)
 		return EXIT;
+	nchronological_backtracks++;
 	for (;;) {
 		assert(decisionLevel() > 0);
 		assert(!cmpmgr.topDecision().hasUnprocessedSplitComp());
@@ -1270,10 +1538,26 @@ void PBcounter<T_data>::printStats() const
 	if(verbosity_c) {
 		if(progress == COMPLETED || progress == FAILED) {
 			printf("c o [Statistics]\n");
+			size_t equality_attached = 0;
+			size_t equality_root_true = 0;
+			for (const RowInfo& row : rows_) {
+				if (row.group == NO_EQUALITY_GROUP) continue;
+				if (row.state == RowState::ATTACHED) equality_attached++;
+				else equality_root_true++;
+			}
+			printf("c o equality groups        = %zu (attached dirs %zu, root-true dirs %zu)\n",
+					groups_.size(), equality_attached, equality_root_true);
+			if(config.inprocess) {
+				printf("c o simplification calls    = %-11"PRIu64"\n", simp_stats.calls);
+				printf("c o simplification changed  = %-11"PRIu64"\n", simp_stats.changed);
+				printf("c o simplification conflict = %-11"PRIu64"\n", simp_stats.conflicts);
+				printf("c o simplification budget   = %-11"PRIu64"\n", simp_stats.budgets);
+				printf("c o simplification time     = %.6f s\n", simp_stats.seconds);
+				printf("c o simplification cache    = legacy\n");
+			}
 			printf("c o conflicts             = %-11"PRIu64" (count %"PRIu64", sat %"PRIu64")\n", conflicts, conflicts-conflicts_sg, conflicts_sg);
 			printf("c o decisions             = %-11"PRIu64" (count %"PRIu64", sat %"PRIu64")\n", decisions, decisions-decisions_sg, decisions_sg);
 			// printf("c o propagations          = %-11"PRIu64" (count %"PRIu64", sat %"PRIu64")\n", propagations, propagations-propagations_sg, propagations_sg);
-			// printf("c o simp dbs              = %-11"PRIu64" (%.3f s)\n", simp_dbs, simplify_time);
 			// printf("c o reduce dbs            = %-11"PRIu64"\n", nbReduceDB);
 			// printf("c o learnts (uni/bin/lbd2)= %"PRIu64"/%"PRIu64"/%"PRIu64"\n", nbUn, nbBin, nbDL2);
 
@@ -1281,7 +1565,12 @@ void PBcounter<T_data>::printStats() const
 			// printf("c o isolated_pvars        = %"PRIu64"\n", nIsoPVars());
 			printf("c o SAT calls             = %-11"PRIu64" (SAT %"PRIu64", UNSAT %"PRIu64")\n", solves, sats, solves-sats);
 			printf("c o SAT starts            = %"PRIu64"\n", starts);
-			// printf("c o backjumps             = %-11"PRIu64" (sp %"PRIu64") [init %s / final %s]\n", nbackjumps+nbackjumps_sp, nbackjumps_sp, config.backjump ? "on" : "off", on_bj ? "on" : "off");
+			printf("c o backjumps             = %-11"PRIu64
+					" (with-lit %"PRIu64", without-lit %"PRIu64", fallback %"PRIu64")\n",
+					nbackjumps+nbackjumps_sp, nbackjumps_with_lit,
+					nbackjumps_without_lit, nbackjumps_sp);
+			printf("c o chronological backs   = %"PRIu64"\n",
+					nchronological_backtracks);
 			printf("c o\n");
 		}
 		if(config.ddnnf) {

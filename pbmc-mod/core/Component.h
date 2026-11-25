@@ -10,11 +10,13 @@ Use of this source code is governed by an MIT-style license that can be found in
 #include "mtl/Alloc.h"
 #include "core/SolverTypes.h"
 #include "core/Config.h"
+#include "core/pbconstraint.h"
 #include "ddnnf/DecisionTree.h"
 
 #include <gmpxx.h>
 #include "mpfr/mpreal.h"
 #include <vector>
+#include <unordered_map>
 #include <math.h>
 
 #include "roundingsatInclude.h" // for rs namespace
@@ -26,6 +28,12 @@ namespace GPMC {
 
 typedef int ClID;
 #define clid_Undef (-1)
+
+struct ComponentBind {
+	RowVersionID version = NO_ROW_VERSION;
+	ClID clid = clid_Undef;
+	rs::CRef cref = rs::CRef_Undef;
+};
 
 typedef unsigned CacheEntryID;
 
@@ -610,12 +618,11 @@ class ComponentManager {
 
 	ConfigComponentManager config;
 
-	int fixed_level_;
-
 	// for pb
 	rs::ConstraintAllocator pbca_;
 	rs::ConstrExpPools cepools_;
 	vector<rs::CRef> constraints_;
+	unordered_map<RowVersionID, ComponentBind> row_binds_;
 	// vector<int> slacks_;
 	vec<unsigned> bits_of_weights_;
 	vector<int> gaps_;
@@ -623,7 +630,7 @@ class ComponentManager {
 
 public:
 	ComponentManager() :
-		npvars_(0), components(0), num_try_split(0), fixed_level_(0) {
+		npvars_(0), components(0), num_try_split(0) {
 			// added from roundingsat
 			pbca_.capacity(1024 * 1024);  // 4MB
 	}
@@ -640,7 +647,11 @@ public:
 	void init(int nvars, int npvars, const vec<CRef>& sclauses, const ClauseAllocator& sca);
 
 	// overloading for pb
-	void init(int nvars, int npvars, const vector<rs::CRef>& sconstraints, const rs::ConstraintAllocator& sca);
+	void init(int nvars, int npvars, const vector<rs::CRef>& sconstraints,
+			const rs::ConstraintAllocator& sca, const vector<RowInfo>& rows);
+	bool hasRowBind(RowVersionID version) const;
+	const ComponentBind& rowBind(RowVersionID version) const;
+	bool validRowBind(RowVersionID version, uint64_t solver_id) const;
 
 	int splitComponent(const vec<lbool>& assigns, const vec<T_data>& lit_weight = {});
 
@@ -735,16 +746,6 @@ public:
 
 	void printScore(Var v, double activity) {
 		printf("c o activity:%lf, var_freq:%lf\n", activity, var_frequency_[v]);
-	}
-
-	bool checkfixedDL() {
-		if(fixed_level_+1 == dl_.size()) {
-			if(!dl_.back().isFirstBranch() && dl_.back().numUnprocessedSplitComp()==1) {
-				fixed_level_++;
-				return true;
-			}
-		}
-		return false;
 	}
 
 	void setRoot(NodeIndex node) { nodeMgr.setRoot(node); }

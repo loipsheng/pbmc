@@ -11,6 +11,7 @@ Use of this source code is governed by an MIT-style license that can be found in
 #include "core/Component.h"
 #include "core/Config.h"
 #include "core/Instance.h"
+#include "core/simplify.h"
 #include "preprocessor/Preprocessor.h"
 #include "ddnnf/DecisionTree.h"
 
@@ -70,6 +71,7 @@ public:
 
 	void copyPBInsNPVar();			// Copying parsed number of PB variables to counter internal settings
 	void copyPBInsPhase();			// copying optimal phase for each pb variable from pbins (phase defaults to assignment that subtracts coefficient from slack)
+	bool addRows();					// Direct exact import of canonical PB rows into RoundingSat
 
 	// Data members
 	//
@@ -84,8 +86,10 @@ public:
 	uint64_t conflicts_pre=0, decisions_pre=0, propagations_pre=0;
 	uint64_t conflicts_sg=0, decisions_sg=0, propagations_sg=0;
 	uint64_t sats=0, nbackjumps=0, nbackjumps_sp=0;
-	uint64_t reduce_dbs_pre=0, simp_dbs=0;
-	double simplify_time=0;
+	uint64_t nbackjumps_with_lit=0, nbackjumps_without_lit=0;
+	uint64_t nchronological_backtracks=0;
+	uint64_t reduce_dbs_pre=0;
+	SimpStats simp_stats;
 
 	// Statistics: (read-only member variable)
 	// (copied over from Glucose solver.h) since we using rs::solver instead.
@@ -102,7 +106,15 @@ public:
 protected:
 	// Methods
 	//
-	bool simplify();
+	SimpResult simplifyNode();
+	rs::CeArb makeCe(const PBconstraint& row);
+	PBconstraint contentOf(const rs::CeArb& ce, SourceRowID source) const;
+	PBconstraint contentOf(const rs::Constr& constraint, SourceRowID source) const;
+	bool addDir(const PBconstraint& row, EqualityGroupID group, RowSide side,
+			RowVersionID version, const rs::CeSuper& ce, RowInfo& result);
+	bool addEq(const PBconstraint& row);
+	rs::CRef solverRef(RowVersionID version) const;
+	void validateRows(bool component_bound) const;
 
 	// import a CNF instance
 	void import();
@@ -159,6 +171,8 @@ protected:
 	int npvars_isolated;	// Number of isolated projection vars
 
 	ComponentManager<T_data> cmpmgr;	// The manger for processing components
+	vector<RowInfo> rows_;
+	vector<EqGroup> groups_;
 	vec<vec<int>> occ_lists;
 
 	vec<rs::Lit> unitcls;			// The list of learnt unit clauses
@@ -182,8 +196,6 @@ protected:
 	void setSearchBelowNonProjectionVarOrder();
 
 	bool on_bj;				// limited bachjump on/off
-	bool on_simp;				// in-processing simplification on/off
-
 	// progressT progress;		// counter progress
 
 	int verbosity_c;			// verbosity level
@@ -219,4 +231,3 @@ inline void PBcounter<T_data>::printStatsOfCM() const {
 }
 
 #endif
-

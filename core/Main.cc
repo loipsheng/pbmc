@@ -218,6 +218,7 @@ void main_pbmc(PBcounter<T_data>& S, string filename)
 			std::cerr << "Cannot open file:" << filename << std::endl;
 			exit(1);
 		}
+		infeasible_or_error = S.pbins.unsat;
 		S.pbins.renumberVar(); // renumbering variables in constraints to put projection set variables first.
 		S.pbins.makeRenumberedCoeffPositive(); // making all coefficients positive
 		
@@ -229,26 +230,18 @@ void main_pbmc(PBcounter<T_data>& S, string filename)
 			}
 		}
 		S.pbins.computeVarCoeffScore(S.config.coef_tdscore, S.alternativeCoeffScore);
-		// getting an ifstream of renumbered constraints
-		std::stringstream renumberedOpbStream = S.pbins.getRenumberedOpb();
-		boost::iostreams::filtering_istream in;
-		in.push(renumberedOpbStream);
 
-		if (infeasible_or_error) {
-			std::cerr << "Inferred UNSAT when simplifying: " << filename << std::endl;
-			exit(1);
-		}
-		
-		S.setNbVars(S.pbins.vars, true);
-		S.copyPBInsNPVar();
-		S.copyPBInsPhase();
-		rs::CeArb objective = S.cePools.takeArb();
-		
-		infeasible_or_error = rs::parsing::file_read(in, S, objective);
-
-		if (infeasible_or_error) {
-			std::cerr << "UNSAT or inconsistent detected during parsing of " << filename << std::endl;
-			exit(1);
+		if (!infeasible_or_error) {
+			if (S.pbins.vars == 0) {
+				S.sat = true;
+				S.npmodels = 1;
+				infeasible_or_error = true;
+			} else {
+				S.setNbVars(S.pbins.vars, true);
+				S.copyPBInsNPVar();
+				S.copyPBInsPhase();
+				infeasible_or_error = !S.addRows();
+			}
 		}
 	}
 	S.progress = PREPROCESSED;
@@ -310,6 +303,12 @@ int main(int argc, char** argv)
 		parseOptions(argc, argv, true);
 		Configuration config;
 		string filename = (argc == 1) ? "" : argv[1];
+		if(config.cntr.inprocess &&
+				(config.cntr.mode != MC || config.cntr.ddnnf)) {
+			std::cerr << "c ERROR: -inprocess currently supports only exact MC "
+					<< "(-mode=0 with -no-ddnnf)." << std::endl;
+			return 2;
+		}
 
 		if(verb) {
 			printf("c o "GPMC_VERSION"\n");
@@ -371,8 +370,11 @@ int main(int argc, char** argv)
 		fflush(stdout);
 		exit(0);
 
-	} catch (const std::invalid_argument&) {
-		printf("c o Invalid argument\n");
+	} catch (const std::invalid_argument& err) {
+		std::cerr << "c o Invalid argument: " << err.what() << std::endl;
+		exit(1);
+	} catch (const std::logic_error& err) {
+		std::cerr << "c o Internal consistency error: " << err.what() << std::endl;
 		exit(1);
 	} catch (OutOfMemoryException&) {
 		printf("c o INDETERMINATE (out of memory)\n");

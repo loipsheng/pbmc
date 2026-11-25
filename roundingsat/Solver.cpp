@@ -628,7 +628,7 @@ void Solver::removeConstraint(Constr& C, [[maybe_unused]] bool override) {
   assert(!C.isMarkedForDelete());
   assert(!external.count(C.id));
   C.markForDel();
-  ca.wasted += C.getMemSize();
+  ca.wasted += ConstraintAllocator::alignedWordSize(C.getMemSize());
 }
 
 void Solver::dropExternal(ID id, bool erasable, bool forceDelete) {
@@ -665,9 +665,10 @@ void Solver::garbage_collect() {
   for (CRef& cr : constraints) {
     uint32_t offset = cr.ofs;
     size_t memSize = ca[cr].getMemSize();
+    size_t allocatedSize = ConstraintAllocator::alignedWordSize(memSize);
     memmove(ca.memory + ca.at, ca.memory + cr.ofs, sizeof(uint32_t) * memSize);
     cr.ofs = ca.at;
-    ca.at += memSize;
+    ca.at += allocatedSize;
     crefmap[offset] = cr;
   }
 #define update_ptr(cr) cr = crefmap[cr.ofs];

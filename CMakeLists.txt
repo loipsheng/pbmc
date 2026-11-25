@@ -66,6 +66,24 @@ if(BUILD_TESTING)
   add_executable(simplify-result-test tests/inprocessing/simplify_result_test.cc)
   add_test(NAME gate_1_simplify_result COMMAND simplify-result-test)
 
+  add_executable(basic-test tests/inprocessing/basic_test.cc)
+  target_link_libraries(basic-test
+    pbmc roundingsat flowcutter z mpfr gmp gmpxx
+  )
+  add_test(NAME gate_2a_basic_unit COMMAND basic-test)
+
+  add_executable(bicp-test tests/inprocessing/bicp_test.cc)
+  target_link_libraries(bicp-test
+    pbmc roundingsat flowcutter z mpfr gmp gmpxx
+  )
+  add_test(NAME gate_2b_bicp_unit COMMAND bicp-test)
+
+  add_executable(reference-key-test tests/inprocessing/reference_key_test.cc)
+  target_link_libraries(reference-key-test
+    pbmc roundingsat flowcutter z mpfr gmp gmpxx
+  )
+  add_test(NAME gate_2e1_reference_key COMMAND reference-key-test)
+
   find_package(PythonInterp 3 QUIET)
   if(PYTHONINTERP_FOUND)
     add_test(
@@ -84,6 +102,24 @@ if(BUILD_TESTING)
       NAME gate_1_empty_simplifier
       COMMAND ${PYTHON_EXECUTABLE}
               ${CMAKE_CURRENT_SOURCE_DIR}/tests/inprocessing/run_gate_1.py
+              --solver $<TARGET_FILE:pbmc-bin>
+    )
+    add_test(
+      NAME gate_2a_basic
+      COMMAND ${PYTHON_EXECUTABLE}
+              ${CMAKE_CURRENT_SOURCE_DIR}/tests/inprocessing/run_gate_2a.py
+              --solver $<TARGET_FILE:pbmc-bin>
+    )
+    add_test(
+      NAME gate_2b_bicp
+      COMMAND ${PYTHON_EXECUTABLE}
+              ${CMAKE_CURRENT_SOURCE_DIR}/tests/inprocessing/run_gate_2b.py
+              --solver $<TARGET_FILE:pbmc-bin>
+    )
+    add_test(
+      NAME gate_2d_cache_bypass
+      COMMAND ${PYTHON_EXECUTABLE}
+              ${CMAKE_CURRENT_SOURCE_DIR}/tests/inprocessing/run_gate_2d.py
               --solver $<TARGET_FILE:pbmc-bin>
     )
   endif()

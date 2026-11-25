@@ -731,9 +731,12 @@ void PBcounter<T_data>::count_main()
 			// NO CONFLICT
 			if(config.inprocess) {
 				const SimpResult result = simplifyNode();
-				if(result.status != SimpStatus::UNCHANGED)
+				if(result.status == SimpStatus::IMPLIED)
+					continue;
+				if(result.status != SimpStatus::UNCHANGED &&
+						result.status != SimpStatus::BUDGET)
 					throw std::logic_error(
-							"Gate 1 empty simplifier returned a non-empty status");
+							"read-only simplification changed search state");
 			}
 			assert(!cmpmgr.topDecision().hasUnprocessedSplitComp());
 
@@ -794,7 +797,7 @@ void PBcounter<T_data>::count_main()
 		// cleanup from rs solver
 		if (rs::stats.NCONFL >= (rs::stats.NCLEANUP + 1) * nconfl_to_reduce) {
 			++rs::stats.NCLEANUP;
-			reduceDB();
+			reduceDB(config.inprocess);
 			while (rs::stats.NCONFL >= rs::stats.NCLEANUP * nconfl_to_reduce) nconfl_to_reduce += rs::options.dbCleanInc.get();
 		}
 
@@ -1199,7 +1202,7 @@ lbool PBcounter<T_data>::searchBelowFixedOrder(int start_dl) {
 			if (rs::stats.NCONFL >= (rs::stats.NCLEANUP + 1) * nconfl_to_reduce) {
 				if (rs::options.verbosity.get() > 0) puts("c INPROCESSING");
 				++rs::stats.NCLEANUP;
-				reduceDB();
+				reduceDB(config.inprocess);
 				while (rs::stats.NCONFL >= rs::stats.NCLEANUP * nconfl_to_reduce) nconfl_to_reduce += rs::options.dbCleanInc.get();
 				if (lpSolver) rs::aux::timeCall<void>([&] { lpSolver->inProcess(); }, rs::stats.LPTOTALTIME);
 				return l_Undef; // signalling not completed to the main solveSAT loop
@@ -1308,7 +1311,7 @@ lbool PBcounter<T_data>::searchBelow(int start_dl) {
 			if (rs::stats.NCONFL >= (rs::stats.NCLEANUP + 1) * nconfl_to_reduce) {
 				if (rs::options.verbosity.get() > 0) puts("c INPROCESSING");
 				++rs::stats.NCLEANUP;
-				reduceDB();
+				reduceDB(config.inprocess);
 				while (rs::stats.NCONFL >= rs::stats.NCLEANUP * nconfl_to_reduce) nconfl_to_reduce += rs::options.dbCleanInc.get();
 				if (lpSolver) rs::aux::timeCall<void>([&] { lpSolver->inProcess(); }, rs::stats.LPTOTALTIME);
 				return l_Undef; // signalling not completed to the main loop
@@ -1548,12 +1551,32 @@ void PBcounter<T_data>::printStats() const
 			printf("c o equality groups        = %zu (attached dirs %zu, root-true dirs %zu)\n",
 					groups_.size(), equality_attached, equality_root_true);
 			if(config.inprocess) {
+				std::string ablation;
+				if(config.disabled(SimpRule::BASIC)) ablation = "Basic";
+				if(config.disabled(SimpRule::BICP))
+					ablation += ablation.empty() ? "BICP" : ", BICP";
+				printf("c o simplification ablation = %s\n",
+						ablation.empty() ? "none (all enabled)" : ablation.c_str());
 				printf("c o simplification calls    = %-11"PRIu64"\n", simp_stats.calls);
 				printf("c o simplification changed  = %-11"PRIu64"\n", simp_stats.changed);
 				printf("c o simplification conflict = %-11"PRIu64"\n", simp_stats.conflicts);
 				printf("c o simplification budget   = %-11"PRIu64"\n", simp_stats.budgets);
 				printf("c o simplification time     = %.6f s\n", simp_stats.seconds);
-				printf("c o simplification cache    = legacy\n");
+				printf("c o Basic calls             = %-11"PRIu64"\n", simp_stats.basic_calls);
+				printf("c o Basic rows              = %-11"PRIu64"\n", simp_stats.basic_rows);
+				printf("c o Basic open              = %-11"PRIu64"\n", simp_stats.basic_open);
+				printf("c o Basic satisfied         = %-11"PRIu64"\n", simp_stats.basic_satisfied);
+				printf("c o BICP calls              = %-11"PRIu64"\n", simp_stats.bicp_calls);
+				printf("c o BICP candidates         = %-11"PRIu64"\n", simp_stats.bicp_candidates);
+				printf("c o BICP probes             = %-11"PRIu64"\n", simp_stats.bicp_probes);
+				printf("c o BICP complete           = %-11"PRIu64"\n", simp_stats.bicp_complete);
+				printf("c o BICP conflicts          = %-11"PRIu64"\n", simp_stats.bicp_conflicts);
+				printf("c o BICP unknown            = %-11"PRIu64"\n", simp_stats.bicp_unknown);
+				printf("c o BICP failed             = %-11"PRIu64"\n", simp_stats.bicp_failed);
+				printf("c o BICP common             = %-11"PRIu64"\n", simp_stats.bicp_common);
+				printf("c o BICP unsat              = %-11"PRIu64"\n", simp_stats.bicp_unsat);
+				printf("c o BICP implied            = %-11"PRIu64"\n", simp_stats.bicp_implied);
+				printf("c o BICP work               = %-11"PRIu64"\n", simp_stats.bicp_work);
 			}
 			printf("c o conflicts             = %-11"PRIu64" (count %"PRIu64", sat %"PRIu64")\n", conflicts, conflicts-conflicts_sg, conflicts_sg);
 			printf("c o decisions             = %-11"PRIu64" (count %"PRIu64", sat %"PRIu64")\n", decisions, decisions-decisions_sg, decisions_sg);

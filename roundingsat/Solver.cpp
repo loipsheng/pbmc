@@ -684,7 +684,7 @@ void Solver::garbage_collect() {
 
 // We assume in the garbage collection method that reduceDB() is the
 // only place where constraints are removed from memory.
-void Solver::reduceDB() {
+void Solver::reduceDB(bool keepFormula) {
   std::vector<CRef> learnts;
   learnts.reserve(constraints.size() / 2);
 
@@ -693,6 +693,7 @@ void Solver::reduceDB() {
   for (CRef& cr : constraints) {
     Constr& C = ca[cr];
     if (C.isMarkedForDelete() || external.count(C.id)) continue;
+    if (keepFormula && C.getOrigin() == Origin::FORMULA) continue;
     bool isReason = false;
     for (unsigned int i = 0; i < C.size() && !isReason; ++i) {
       isReason = Reason[toVar(C.lit(i))] == cr;

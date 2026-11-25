@@ -60,17 +60,27 @@ int availableRAMSize(){
 #endif
 
 template <class T_data>
-void ComponentCache<T_data>::init(int cachesize) {
+void ComponentCache<T_data>::init(int cachesize, CacheMode mode) {
+	mode_ = mode;
 	table_.clear();
 	entry_base_.clear();
 	entry_base_.reserve(2000000);
 	entry_base_.push_back(new CachedComponent<T_data>()); // dummy Element
-	table_.resize(900001, NULL);
+	table_.resize(bypass() ? 1 : 900001, NULL);
 	free_entry_base_slots_.clear();
 	free_entry_base_slots_.reserve(10000);
 
 	// maximum_cache_size_bytes = (int64_t) availableRAMSize() * 1048576;
 	maximum_cache_size_bytes = (int64_t) cachesize * 1048576;
+	my_time_ = 0;
+	num_occupied_buckets_ = 0;
+	num_cache_hits_ = 0;
+	num_cache_look_ups_ = 0;
+	num_cache_inserts_ = 0;
+	num_cache_reduce_ = 0;
+	sum_cache_hit_sizes_ = 0;
+	num_cached_components_ = 0;
+	sum_size_cached_components_ = 0;
 
 	recompute_bytes_memory_usage();
 }
@@ -80,24 +90,28 @@ CacheEntryID ComponentCache<T_data>::createEntryFor(Component &comp, unsigned st
 	my_time_++;
 	CacheEntryID id;
 
-	if (cache_bytes_memory_usage_ >= maximum_cache_size_bytes) {
+	if (!bypass() && cache_bytes_memory_usage_ >= maximum_cache_size_bytes) {
 		deleteEntries();
 		num_cache_reduce_++;
 	}
 
-	assert(cache_bytes_memory_usage_ < maximum_cache_size_bytes);
+	assert(bypass() || cache_bytes_memory_usage_ < maximum_cache_size_bytes);
 	if (free_entry_base_slots_.empty()) {
 		if (entry_base_.capacity() == entry_base_.size()) {
 			entry_base_.reserve(2 * entry_base_.size());
 		}
-		entry_base_.push_back(new CachedComponent<T_data>(comp, manager));
+		entry_base_.push_back(bypass()
+				? new CachedComponent<T_data>()
+				: new CachedComponent<T_data>(comp, manager));
 		id = entry_base_.size() - 1;
 	} else {
 		id = free_entry_base_slots_.back();
 		assert(id < entry_base_.size());
 		assert(entry_base_[id] == nullptr);
 		free_entry_base_slots_.pop_back();
-		entry_base_[id] = new CachedComponent<T_data>(comp, manager);
+		entry_base_[id] = bypass()
+				? new CachedComponent<T_data>()
+				: new CachedComponent<T_data>(comp, manager);
 	}
 	entry_base_[id]->setComponentStackID(stack_id);
 	entry_base_[id]->set_creation_time(my_time_);
@@ -105,7 +119,8 @@ CacheEntryID ComponentCache<T_data>::createEntryFor(Component &comp, unsigned st
 	assert(entry_base_[id]->first_descendant() == 0);
 	assert(entry_base_[id]->next_sibling() == 0);
 	cache_bytes_memory_usage_ += entry_base_[id]->SizeInBytes();
-	sum_size_cached_components_ += entry_base_[id]->num_variables();
+	if (!bypass())
+		sum_size_cached_components_ += entry_base_[id]->num_variables();
 	num_cached_components_++;
 
 	return id;
@@ -158,24 +173,28 @@ CacheEntryID ComponentCache<T_data>::createEntryFor(Component &comp, unsigned st
 	my_time_++;
 	CacheEntryID id;
 
-	if (cache_bytes_memory_usage_ >= maximum_cache_size_bytes) {
+	if (!bypass() && cache_bytes_memory_usage_ >= maximum_cache_size_bytes) {
 		deleteEntries();
 		num_cache_reduce_++;
 	}
 
-	assert(cache_bytes_memory_usage_ < maximum_cache_size_bytes);
+	assert(bypass() || cache_bytes_memory_usage_ < maximum_cache_size_bytes);
 	if (free_entry_base_slots_.empty()) {
 		if (entry_base_.capacity() == entry_base_.size()) {
 			entry_base_.reserve(2 * entry_base_.size());
 		}
-		entry_base_.push_back(new CachedComponent<T_data>(comp, manager, assigns));
+		entry_base_.push_back(bypass()
+				? new CachedComponent<T_data>()
+				: new CachedComponent<T_data>(comp, manager, assigns));
 		id = entry_base_.size() - 1;
 	} else {
 		id = free_entry_base_slots_.back();
 		assert(id < entry_base_.size());
 		assert(entry_base_[id] == nullptr);
 		free_entry_base_slots_.pop_back();
-		entry_base_[id] = new CachedComponent<T_data>(comp, manager, assigns);
+		entry_base_[id] = bypass()
+				? new CachedComponent<T_data>()
+				: new CachedComponent<T_data>(comp, manager, assigns);
 	}
 	entry_base_[id]->setComponentStackID(stack_id);
 	entry_base_[id]->set_creation_time(my_time_);
@@ -183,7 +202,8 @@ CacheEntryID ComponentCache<T_data>::createEntryFor(Component &comp, unsigned st
 	assert(entry_base_[id]->first_descendant() == 0);
 	assert(entry_base_[id]->next_sibling() == 0);
 	cache_bytes_memory_usage_ += entry_base_[id]->SizeInBytes();
-	sum_size_cached_components_ += entry_base_[id]->num_variables();
+	if (!bypass())
+		sum_size_cached_components_ += entry_base_[id]->num_variables();
 	num_cached_components_++;
 
 	return id;
@@ -191,6 +211,7 @@ CacheEntryID ComponentCache<T_data>::createEntryFor(Component &comp, unsigned st
 
 template <class T_data>
 bool ComponentCache<T_data>::requestValueOf(Component &comp, T_data &rn, NodeIndex &node) {
+	if (bypass()) return false;
 	CachedComponent<T_data> &packedcomp = entry(comp.id());
 
 	unsigned int v = clip(packedcomp.hashkey());

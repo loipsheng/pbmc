@@ -41,6 +41,7 @@ enum btStateT {
 template <class T_data> // either mpz_class (gmp int for unweighted) or mpfr::mpreal (weighted counting)
 
 class PBcounter: public rs::Solver {
+	friend class Simplifier<T_data>;
 public:
 	// Constructor/Destructor
 	//

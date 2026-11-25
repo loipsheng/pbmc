@@ -231,7 +231,7 @@ class Solver {
   // Garbage collection
 
   void garbage_collect();
-  void reduceDB();
+  void reduceDB(bool keepFormula = false);
 
   // ---------------------------------------------------------------------
   // Solving

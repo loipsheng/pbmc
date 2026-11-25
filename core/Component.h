@@ -33,6 +33,18 @@ struct ComponentBind {
 	RowVersionID version = NO_ROW_VERSION;
 	ClID clid = clid_Undef;
 	rs::CRef cref = rs::CRef_Undef;
+	EqualityGroupID group = NO_EQUALITY_GROUP;
+	RowSide side = RowSide::SINGLE;
+};
+
+struct ReferenceKey {
+	vector<uint8_t> bytes;
+	uint64_t hash = 0;
+
+	bool operator==(const ReferenceKey& other) const {
+		return hash == other.hash && bytes == other.bytes;
+	}
+	bool operator!=(const ReferenceKey& other) const { return !(*this == other); }
 };
 
 typedef unsigned CacheEntryID;
@@ -461,9 +473,11 @@ class ComponentCache {
 
 	unsigned long num_occupied_buckets_ = 0;
 	unsigned long my_time_ = 0;
+	CacheMode mode_ = CacheMode::LEGACY;
 
 public:
-	void init(int cachesize);
+	void init(int cachesize, CacheMode mode);
+	bool bypass() const { return mode_ == CacheMode::BYPASS; }
 
 	void add_descendant(CacheEntryID compid, CacheEntryID descendantid) {
 		assert(descendantid != entry(compid).first_descendant());
@@ -514,7 +528,8 @@ public:
 	// unchecked erase of an entry from entry_base_
 	void eraseEntry(CacheEntryID id) {
 		cache_bytes_memory_usage_ -= entry_base_[id]->SizeInBytes();
-		sum_size_cached_components_ -= entry_base_[id]->num_variables();
+		if (!bypass())
+			sum_size_cached_components_ -= entry_base_[id]->num_variables();
 		num_cached_components_--;
 		delete entry_base_[id];
 		entry_base_[id] = nullptr;
@@ -538,8 +553,10 @@ public:
 	inline void cleanAllDescendantsOf(CacheEntryID id, int num_comps);
 
 	void printStats() const {
+		printf("c o Cache mode            = %s\n", bypass() ? "bypass" : "legacy");
 		printf("c o Cache lookup          = %"PRIu64"\n", num_cache_look_ups_);
 		printf("c o Cache hit             = %"PRIu64"\n", num_cache_hits_);
+		printf("c o Cache insert          = %"PRIu64"\n", num_cache_inserts_);
 		printf("c o Cache reduce          = %"PRIu64"\n", num_cache_reduce_);
 	}
 	// --- Added by k-hasimt --- END
@@ -547,6 +564,7 @@ public:
 private:
 	uint64_t num_cache_hits_ = 0;
 	uint64_t num_cache_look_ups_ = 0;
+	uint64_t num_cache_inserts_ = 0;
 	uint64_t num_cache_reduce_ = 0;
 	uint64_t sum_cache_hit_sizes_ = 0;
 	uint64_t num_cached_components_ = 0;
@@ -623,6 +641,7 @@ class ComponentManager {
 	rs::ConstrExpPools cepools_;
 	vector<rs::CRef> constraints_;
 	unordered_map<RowVersionID, ComponentBind> row_binds_;
+	vector<ComponentBind> clid_binds_;
 	// vector<int> slacks_;
 	vec<unsigned> bits_of_weights_;
 	vector<int> gaps_;
@@ -652,6 +671,7 @@ public:
 	bool hasRowBind(RowVersionID version) const;
 	const ComponentBind& rowBind(RowVersionID version) const;
 	bool validRowBind(RowVersionID version, uint64_t solver_id) const;
+	ReferenceKey referenceKey(Component& component, const vec<lbool>& assigns) const;
 
 	int splitComponent(const vec<lbool>& assigns, const vec<T_data>& lit_weight = {});
 
@@ -1168,6 +1188,11 @@ void ComponentCache<T_data>::removeFromDescendantsTree(CacheEntryID id) {
 
 template <class T_data>
 void ComponentCache<T_data>::storeValueOf(CacheEntryID id, const T_data &model_count, NodeIndex node) {
+	if (bypass()) {
+		while (entry(id).first_descendant())
+			cleanPollutionsInvolving(entry(id).first_descendant());
+		return;
+	}
 	CacheBucket<T_data> &bucket = at(clip(entry(id).hashkey()));
 	// when storing the new model count the size of the model count
 	// and hence that of the component will change
@@ -1177,6 +1202,7 @@ void ComponentCache<T_data>::storeValueOf(CacheEntryID id, const T_data &model_c
 	entry(id).set_creation_time(my_time_);
 	entry(id).set_DTNode(node);
 	bucket.push_back(id);
+	num_cache_inserts_++;
 	cache_bytes_memory_usage_ += entry(id).SizeInBytes();
 }
 

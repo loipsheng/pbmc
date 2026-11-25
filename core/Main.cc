@@ -309,6 +309,10 @@ int main(int argc, char** argv)
 					<< "(-mode=0 with -no-ddnnf)." << std::endl;
 			return 2;
 		}
+		if(!config.cntr.inprocess && !config.cntr.ablation.empty()) {
+			std::cerr << "c ERROR: -ablation requires -inprocess." << std::endl;
+			return 2;
+		}
 
 		if(verb) {
 			printf("c o "GPMC_VERSION"\n");

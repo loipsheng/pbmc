@@ -12,7 +12,7 @@
 
 ## 0. Codex 的执行合同（必须逐条执行）
 
-1. **当前停止点是 Gate 1-I 验收完成**。空框架已接入并通过 Release、ASan/UBSan；下一步只能先编写并审核 Gate 2A Basic 的独立伪代码，不得直接实现 Basic。
+1. **当前停止点是 Gate 2A-P**。Gate 1 已通过验收；本轮只交付 `docs/inprocessing/pseudocode/01_basic.md`。Basic 的六项决定经用户审核前不得开始 Gate 2A-I。
 2. **不修改旧 PBInstance 根预处理算法**。保留硬编码的 `simplifyRenumberedConstraint()`、输入解析和现有 `postProcess()` 行为；发现的根层问题先建基线测试、单独排期，不混入递归简化规则。
 3. **统一文件，规则可独立开关**。所有简化规则的声明、结果类型和最小共享状态放在 `core/simplify.h`，实现放在 `core/simplify.cc`；规则以 `Simplifier` 的短方法区分并独立消融，不再建立 `Basic.h`、`SC.h`、`Rir.h` 等规则文件，也不为每个概念建立抽象类、adapter 或重复容器。优先复用 `CeSuper/ConstrExp`、trail、Component/Decision、现有 occurrence 和精确整数类型。
 4. **一次只做一个可验收版本**。单项变更包含规则、短开关、最小测试、计数差分、必要统计和验收文档；失败时只修该项。
@@ -396,14 +396,17 @@ Gate X-I（Implementation）
 
 ### 5.1 关卡 2A：Basic（`Simplifier::basic()`）
 
-- 读取当前有效 residual row 的 `gap`、未赋值贡献 `U`、`slack=U-gap`；`gap<=0` 标记当前已满足，`U<gap` 返回 conflict，`a_i>slack` 识别可能 forced literal。
-- 首选已有 RoundingSat watched propagation，不要在 BasicCheck 中第二次直接写 `assigns`。若需提交新蕴含，必须有合法 PB reason；不可把 `decide()` 当作传播。
-- 支持负文字与 equality 两方向，且必须去除同变量互补和重复的影响。Basic 自身不做正式 structural delete，交给 Rir 的 overlay 阶段。
-- 将 fixed 文字代入**只读残余视图**；将 RV 作为表示功能维护，而不是实现另一套 physical matrix column delete。
+- 真实源码确认 RoundingSat `Counting/Watched/Cardinality/Clause` 已按 `a_i>slack` 调用 `propagate(lit,CRef)`，并为非根赋值保存正式 Reason。Basic 不再建立第二套 enqueue；UP 的唯一所有者仍是 RoundingSat。
+- Basic 读取当前组件基础 RowVersion 和 live `Level/Pos`，用 `BigVal/BigCoef` 构造瞬时 residual：`gap=d-true_sum`、`U=unknown_sum`、`slack=U-gap`。`gap<=0` 为 satisfied，正常未满足行为 open。
+- 在 native propagation 无冲突且 `qhead==trail.size()` 后，`U<gap` 或未知文字 `a_i>slack` 都表示传播不动点违规。Gate 2A 运行时 fail-closed，不把它伪装成 Basic 命中、备用冲突路径或第二套 Reason。
+- 支持负文字和 equality 两个 attached 方向；ROOT_TRUE 方向保留 metadata 并跳过。Basic 不正式 inactive/delete，交给 RIR。
+- EDPLLSim 的物理 `removeFixedVariables()` 不直接迁移；PBMC 将 fixed 文字代入只读 view，不改 solver row、ComponentManager frozen row、revision 或 legacy cache。
+- `ComponentManager::gaps_` 和 `assigns` 在该调用点尚未同步且 gap 只有 `int`，不能复用；Basic 直接读取 live RoundingSat 精确行。
+- `reduceDB()` 当前会删除根层已满足的 formula row；`-inprocess` 必须用默认关闭的窄参数保留 `Origin::FORMULA`，保证 0E RowVersion、逐节点验证和未来 Reason 来源跨 cleanup 仍可解析，standalone RoundingSat 保持原行为。
 
-**测试**：`5x+2y+z>=4` 强制 x=1；`2x+3y>=6` 冲突；`2x+3y>=0` 恒真；`2x+3y>=3` 仅强制 y=1；负文字 `3~x+2y>=3` 强制 ~x=1（需检查示例是否有其他强制项）。基线无重复固定；回跳后恢复。
+**测试**：原指南中的 `5x+2y+z>=4`、`2x+3y>=3` 和 `3~x+2y>=3` 由 native UP 完成固定，Basic 随后只观察 satisfied；`2x+3y>=6` 在进入 Basic 前冲突；`2x+3y>=0` 为 ROOT_TRUE；`x+y>=1` 验证 OPEN。另测非根 Reason、强制 GC、missed-propagation 故障注入、equality 双方向、组件范围和 cache/stat 差分。
 
-**验收门槛**：规则独开时 oracle 一致、所有强制文字有合法推导、未改变原始结构 key；然后再做 BICP。
+**验收门槛**：`pseudocode/01_basic.md` 的六项决定先获审核；规则独开时 oracle 一致、trail/Reason/结构/cache 完全不变、传播遗漏 fail-closed、formula RowVersion 跨 cleanup/GC 仍可解析，然后再做 BICP。
 
 ### 5.2 关卡 2B：BICP 双向探测引擎（`Simplifier::bicp()`）
 
@@ -1145,7 +1148,7 @@ resource: wall_time, cpu_time, peak_RSS, ASan/UBSan status
 | 0 | 审计真实仓库、修订指南、保存 baseline | Legacy；只审计 Bypass | 用户审核 |
 | 0B | MC oracle、Config UBSan、backjump 覆盖、模式拒绝、operator 基线 | Legacy | 0E |
 | 0E | Equality contract：`<=` canonicalization、`=` sibling/group identity | Legacy | 1 |
-| 1 | 删除旧空入口；`simplifyNode`、`SimpResult`、联合循环 | Legacy | 2A |
+| 1 | 删除旧空入口；`simplifyNode`、`SimpResult`、正确接入点（尚无联合循环） | Legacy | 2A |
 | 2A | Basic/UP/RV view | Legacy，若不改结构 | 2B |
 | 2B | BICP 双向引擎与完整 rollback | Legacy，view-only | 2C |
 | 2C | BICP failed-literal + 公共蕴含正式提交 | Legacy，若只推导赋值 | 2D |

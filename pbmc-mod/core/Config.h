@@ -1,7 +1,9 @@
 #ifndef CONFIG_H_
 #define CONFIG_H_
 
+#include <cstdint>
 #include <string>
+#include <unordered_set>
 #include <float.h>
 #include "utils/Options.h"
 
@@ -11,6 +13,16 @@ using namespace Glucose;
 
 enum Mode { MC, WMC, PMC, WPMC };
 
+enum class CacheMode : std::uint8_t {
+	LEGACY,
+	BYPASS
+};
+
+enum class SimpRule : std::uint8_t {
+	BASIC = 1,
+	BICP = 2
+};
+
 struct ConfigCounter {
 	Mode mode;
 	bool ddnnf;
@@ -19,6 +31,8 @@ struct ConfigCounter {
 	bool backjump;
 	double bj_threshold;
 	bool inprocess;
+	std::unordered_set<SimpRule> ablation;
+	bool disabled(SimpRule rule) const { return ablation.count(rule) != 0; }
 	bool natw;
 	std::string pp_outfile;
 	std::string td_outfile;
@@ -36,6 +50,7 @@ struct ConfigComponentManager {
 	bool ddnnf;
 	int varSelectionHueristics;
 	int cachesize;
+	CacheMode cacheMode;
 };
 
 struct ConfigPreprocessor {

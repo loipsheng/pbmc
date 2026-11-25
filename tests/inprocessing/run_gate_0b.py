@@ -123,7 +123,8 @@ def main() -> int:
 
     backjump_case = cases / "backjump_without_lit.opb"
     backjump_result = run_solver(
-        solver, backjump_case, "-mode=0", "-inprocess", "-vs=0", "-bjthd=0.99"
+        solver, backjump_case, "-mode=0", "-inprocess", "-ablation=1:2",
+        "-vs=0", "-bjthd=0.99"
     )
     if exact_count(backjump_result, "ResolveWithoutLit backjump") != 19:
         raise AssertionError("backjump case: wrong exact count")
@@ -138,7 +139,8 @@ def main() -> int:
         raise AssertionError("backjump case did not execute ordinary backtrack")
 
     no_backjump_result = run_solver(
-        solver, backjump_case, "-mode=0", "-inprocess", "-vs=0", "-no-bj"
+        solver, backjump_case, "-mode=0", "-inprocess", "-ablation=1:2",
+        "-vs=0", "-no-bj"
     )
     if exact_count(no_backjump_result, "backjump disabled") != 19:
         raise AssertionError("-no-bj changed the exact count")

@@ -77,7 +77,7 @@ def simplification_stats(output: str, label: str) -> None:
         raise AssertionError(f"{label}: empty framework was not called")
     if any(values[key] != 0 for key in ("changed", "conflict", "budget")):
         raise AssertionError(f"{label}: empty framework changed state: {values}")
-    if "c o simplification cache    = legacy" not in output:
+    if "c o Cache mode            = legacy" not in output:
         raise AssertionError(f"{label}: legacy cache mode was not reported\n{output}")
 
 
@@ -102,7 +102,9 @@ def main() -> int:
         disabled = run_solver(
             solver, instance, "-mode=0", "-no-inprocess", "-vs=0"
         )
-        enabled = run_solver(solver, instance, "-mode=0", "-inprocess", "-vs=0")
+        enabled = run_solver(
+            solver, instance, "-mode=0", "-inprocess", "-ablation=1:2", "-vs=0"
+        )
         oracle = count_models(instance)
         off_count = exact_count(disabled, f"{filename} disabled")
         on_count = exact_count(enabled, f"{filename} enabled")
@@ -128,7 +130,7 @@ def main() -> int:
             raise AssertionError(f"legacy option {option} was not rejected\n{result.stdout}")
 
     print(
-        "Gate 1 empty framework on/off counts and search statistics match; "
+        "Gate 1 empty framework (-ablation=1:2) counts and search statistics match; "
         "legacy rmvsatcl options are rejected"
     )
     return 0

@@ -10,6 +10,7 @@ Use of this source code is governed by an MIT-style license that can be found in
 #include <limits.h>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 
 using namespace GPMC;
 
@@ -65,7 +66,7 @@ void ComponentManager<T_data>::init(int nvars, int npvars, const vec<CRef>& scla
 	npvars_ = npvars;
 
 #ifdef CACHE
-	cache_.init(config.cachesize);
+	cache_.init(config.cachesize, config.cacheMode);
 	CachedComponent<T_data>::adjustPackSize(nvars, clauses_.size());
 #endif
 
@@ -89,8 +90,12 @@ void ComponentManager<T_data>::init(int nvars, int npvars,
 	vec< vec<Var> > binlinks(nvars);
 	vec< vec<ClID> > occ(nvars); // using clid here because rs::ID is unsigned and we use negative values as seperator values
 	unordered_map<uint64_t, RowVersionID> versions;
+	unordered_map<RowVersionID, const RowInfo*> row_info;
 	row_binds_.clear();
+	clid_binds_.clear();
 	for (const RowInfo& row : rows) {
+		if (row.version == NO_ROW_VERSION || !row_info.emplace(row.version, &row).second)
+			throw logic_error("invalid or duplicate row version");
 		if (row.state == RowState::ROOT_TRUE) {
 			if (row.solver_id != NO_SOLVER_ID)
 				throw logic_error("ROOT_TRUE row unexpectedly has a solver ID");
@@ -116,14 +121,20 @@ void ComponentManager<T_data>::init(int nvars, int npvars,
 		rs::CRef comp_cr = ce->toConstr(pbca_, true, comp_cr_id); // write the constraint into component manager constraint allocator
 		constraints_.push_back(comp_cr);
 		auto version = versions.find(C.id);
+		ComponentBind binding;
+		binding.clid = static_cast<ClID>(constraints_.size() - 1);
+		binding.cref = comp_cr;
 		if (version != versions.end()) {
-			ComponentBind binding;
+			auto metadata = row_info.find(version->second);
+			if (metadata == row_info.end() || metadata->second->state != RowState::ATTACHED)
+				throw logic_error("attached constraint has invalid row metadata");
 			binding.version = version->second;
-			binding.clid = static_cast<ClID>(constraints_.size() - 1);
-			binding.cref = comp_cr;
+			binding.group = metadata->second->group;
+			binding.side = metadata->second->side;
 			if (!row_binds_.emplace(binding.version, binding).second)
 				throw logic_error("duplicate ComponentManager row binding");
 		}
+		clid_binds_.push_back(binding);
 		// still need to fill up the var_frequency_ and occ
 		for (size_t j = 0; j < C.size(); j++) {
 			var_frequency_[rs::toVar(C.lit(j))-1]++;
@@ -163,7 +174,7 @@ void ComponentManager<T_data>::init(int nvars, int npvars,
 	npvars_ = npvars;
 
 #ifdef CACHE
-	cache_.init(config.cachesize);
+	cache_.init(config.cachesize, config.cacheMode);
 	CachedComponent<T_data>::adjustPackSize(nvars, constraints_.size());
 #endif
 
@@ -200,6 +211,165 @@ bool ComponentManager<T_data>::validRowBind(
 			constraints_[binding.clid].ofs != binding.cref.ofs)
 		return false;
 	return pbca_[binding.cref].id == solver_id;
+}
+
+template <typename T_data>
+ReferenceKey ComponentManager<T_data>::referenceKey(
+		Component& component, const vec<lbool>& assigns) const {
+	struct ResidualRow {
+		bool active = false;
+		vector<uint8_t> bytes;
+	};
+
+	auto appendNumber = [](uint64_t value, vector<uint8_t>& output) {
+		do {
+			uint8_t byte = static_cast<uint8_t>(value & 0x7fU);
+			value >>= 7;
+			if (value != 0) byte |= 0x80U;
+			output.push_back(byte);
+		} while (value != 0);
+	};
+	auto appendBig = [&](const rs::BigVal& value, vector<uint8_t>& output) {
+		const string text = value.str();
+		appendNumber(text.size(), output);
+		output.insert(output.end(), text.begin(), text.end());
+	};
+
+	unordered_map<Var, uint64_t> local;
+	vector<Var> variables;
+	variables.reserve(component.nVars());
+	for (int i = 0; i < component.nVars(); ++i) {
+		const Var variable = component[i];
+		if (value(variable, assigns) != l_Undef) continue;
+		local.emplace(variable, variables.size());
+		variables.push_back(variable);
+	}
+
+	unordered_set<ClID> component_rows;
+	component_rows.reserve(component.nlongCls());
+	for (int i = component.nVars() + 1;
+			i < component.nVars() + component.nlongCls() + 1; ++i)
+		component_rows.insert(component[i]);
+
+	auto row = [&](ClID clid) {
+		ResidualRow result;
+		if (clid == clid_Undef) return result;
+		if (clid < 0 || static_cast<size_t>(clid) >= constraints_.size())
+			throw logic_error("residual key found an invalid component row");
+
+		const rs::Constr& constraint = pbca_[constraints_[clid]];
+		rs::BigVal gap = constraint.degree();
+		vector<pair<int64_t, rs::BigCoef>> terms;
+		terms.reserve(constraint.size());
+		for (size_t i = 0; i < constraint.size(); ++i) {
+			const rs::Lit literal = constraint.lit(i);
+			const Var variable = rs::toVar(literal) - 1;
+			const lbool assigned = value(variable, assigns);
+			const bool literal_true =
+					assigned != l_Undef &&
+					((literal > 0 && assigned == l_True) ||
+					 (literal < 0 && assigned == l_False));
+			if (literal_true) {
+				gap -= constraint.coef(i);
+			} else if (assigned == l_Undef) {
+				auto position = local.find(variable);
+				if (position == local.end())
+					throw logic_error("residual row escaped its component variables");
+				const int64_t signed_local = literal > 0
+						? static_cast<int64_t>(position->second + 1)
+						: -static_cast<int64_t>(position->second + 1);
+				terms.emplace_back(signed_local, constraint.coef(i));
+			}
+		}
+		if (gap <= 0) return result;
+
+		rs::BigVal available = 0;
+		for (const auto& term : terms) available += term.second;
+		if (terms.empty() || available < gap)
+			throw logic_error("residual key reached an unpropagated conflict");
+
+		sort(terms.begin(), terms.end(),
+				[](const auto& left, const auto& right) {
+					return left.first < right.first;
+				});
+		result.active = true;
+		appendNumber(terms.size(), result.bytes);
+		for (const auto& term : terms) {
+			appendBig(rs::BigVal(term.first), result.bytes);
+			appendBig(term.second, result.bytes);
+		}
+		appendBig(gap, result.bytes);
+		return result;
+	};
+
+	vector<vector<uint8_t>> records;
+	unordered_set<EqualityGroupID> groups;
+	for (ClID clid : component_rows) {
+		if (static_cast<size_t>(clid) >= clid_binds_.size())
+			throw logic_error("residual key row has no version binding");
+		const ComponentBind& binding = clid_binds_[clid];
+		if (binding.group == NO_EQUALITY_GROUP) {
+			ResidualRow single = row(clid);
+			if (!single.active) continue;
+			vector<uint8_t> record;
+			record.reserve(single.bytes.size() + 1);
+			record.push_back(1);
+			for (uint8_t byte : single.bytes) record.push_back(byte);
+			records.emplace_back(std::move(record));
+			continue;
+		}
+		groups.insert(binding.group);
+	}
+
+	for (EqualityGroupID group : groups) {
+		ClID lower = clid_Undef;
+		ClID upper = clid_Undef;
+		for (const auto& entry : row_binds_) {
+			const ComponentBind& binding = entry.second;
+			if (binding.group != group) continue;
+			if (binding.side == RowSide::LOWER) lower = binding.clid;
+			else if (binding.side == RowSide::UPPER) upper = binding.clid;
+			else throw logic_error("equality row has no direction");
+		}
+		ResidualRow low = row(lower);
+		ResidualRow high = row(upper);
+		if (low.active && !component_rows.count(lower))
+			throw logic_error("active equality lower row escaped its component");
+		if (high.active && !component_rows.count(upper))
+			throw logic_error("active equality upper row escaped its component");
+		if (!low.active && !high.active) continue;
+
+		vector<uint8_t> record(1, 2);
+		record.push_back(low.active ? 1 : 0);
+		if (low.active) {
+			appendNumber(low.bytes.size(), record);
+			record.insert(record.end(), low.bytes.begin(), low.bytes.end());
+		}
+		record.push_back(high.active ? 1 : 0);
+		if (high.active) {
+			appendNumber(high.bytes.size(), record);
+			record.insert(record.end(), high.bytes.begin(), high.bytes.end());
+		}
+		records.emplace_back(std::move(record));
+	}
+
+	sort(records.begin(), records.end());
+	ReferenceKey result;
+	appendNumber(1, result.bytes);
+	appendNumber(variables.size(), result.bytes);
+	for (Var variable : variables)
+		appendNumber(static_cast<uint64_t>(variable), result.bytes);
+	appendNumber(records.size(), result.bytes);
+	for (const vector<uint8_t>& record : records) {
+		appendNumber(record.size(), result.bytes);
+		result.bytes.insert(result.bytes.end(), record.begin(), record.end());
+	}
+	result.hash = 14695981039346656037ULL;
+	for (uint8_t byte : result.bytes) {
+		result.hash ^= byte;
+		result.hash *= 1099511628211ULL;
+	}
+	return result;
 }
 
 template <typename T_data>

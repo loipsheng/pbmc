@@ -122,5 +122,11 @@ if(BUILD_TESTING)
               ${CMAKE_CURRENT_SOURCE_DIR}/tests/inprocessing/run_gate_2d.py
               --solver $<TARGET_FILE:pbmc-bin>
     )
+    add_test(
+      NAME gate_2e_residual_cache
+      COMMAND ${PYTHON_EXECUTABLE}
+              ${CMAKE_CURRENT_SOURCE_DIR}/tests/inprocessing/run_gate_2e.py
+              --solver $<TARGET_FILE:pbmc-bin>
+    )
   endif()
 endif()

@@ -15,7 +15,8 @@ enum Mode { MC, WMC, PMC, WPMC };
 
 enum class CacheMode : std::uint8_t {
 	LEGACY,
-	BYPASS
+	BYPASS,
+	RESIDUAL
 };
 
 enum class SimpRule : std::uint8_t {

@@ -17,6 +17,8 @@ Use of this source code is governed by an MIT-style license that can be found in
 #include "mpfr/mpreal.h"
 #include <vector>
 #include <unordered_map>
+#include <deque>
+#include <utility>
 #include <math.h>
 
 #include "roundingsatInclude.h" // for rs namespace
@@ -45,6 +47,76 @@ struct ReferenceKey {
 		return hash == other.hash && bytes == other.bytes;
 	}
 	bool operator!=(const ReferenceKey& other) const { return !(*this == other); }
+};
+
+using RowTemplateID = uint64_t;
+
+struct ResidualRowKey {
+	bool active = false;
+	ReferenceKey row_template;
+	vector<uint8_t> gap;
+};
+
+struct ResidualRecordKey {
+	uint8_t kind = 0;
+	ResidualRowKey lower;
+	ResidualRowKey upper;
+};
+
+struct PendingComponentKey {
+	vector<uint8_t> variables;
+	vector<ResidualRecordKey> records;
+
+	uint64_t sizeInBytes() const {
+		uint64_t bytes = variables.capacity();
+		for (const ResidualRecordKey& record : records) {
+			bytes += record.lower.row_template.bytes.capacity();
+			bytes += record.lower.gap.capacity();
+			bytes += record.upper.row_template.bytes.capacity();
+			bytes += record.upper.gap.capacity();
+		}
+		return bytes + records.capacity() * sizeof(ResidualRecordKey);
+	}
+};
+
+struct CompactComponentKey {
+	vector<uint8_t> bytes;
+	uint64_t hash = 0;
+
+	bool operator==(const CompactComponentKey& other) const {
+		return hash == other.hash && bytes == other.bytes;
+	}
+};
+
+class RowTemplatePool {
+	struct Entry {
+		ReferenceKey key;
+		uint64_t references = 0;
+		bool alive = false;
+		bool queued = false;
+	};
+
+	vector<Entry> entries_;
+	unordered_map<uint64_t, vector<RowTemplateID>> index_;
+	deque<RowTemplateID> unused_;
+	uint64_t requests_ = 0;
+	uint64_t reuses_ = 0;
+	uint64_t wakes_ = 0;
+	uint64_t reclaimed_ = 0;
+
+	RowTemplateID find(const ReferenceKey& key) const;
+
+public:
+	RowTemplatePool();
+	RowTemplateID probe(const ReferenceKey& key);
+	RowTemplateID acquire(const ReferenceKey& key);
+	void release(RowTemplateID id);
+	void reclaim(bool all = false);
+	uint64_t sizeInBytes() const;
+	uint64_t requests() const { return requests_; }
+	uint64_t reuses() const { return reuses_; }
+	uint64_t wakes() const { return wakes_; }
+	uint64_t reclaimed() const { return reclaimed_; }
 };
 
 typedef unsigned CacheEntryID;
@@ -367,6 +439,9 @@ class CachedComponent: public PackedComponent<T_data> {
 	CacheEntryID father_ = 0;
 	CacheEntryID first_descendant_ = 0;
 	CacheEntryID next_sibling_ = 0;
+	PendingComponentKey pending_key_;
+	CompactComponentKey compact_key_;
+	vector<RowTemplateID> template_refs_;
 
 public:
 	CachedComponent() {
@@ -419,6 +494,9 @@ public:
 	unsigned long SizeInBytes() const {
 		return sizeof(CachedComponent)
 				+ PackedComponent<T_data>::data_size() * sizeof(unsigned)
+				+ pending_key_.sizeInBytes()
+				+ compact_key_.bytes.capacity()
+				+ template_refs_.capacity() * sizeof(RowTemplateID)
 				+ sizeof(T_data);
 				// ToDo: How to estimate the actual data size of mpz_class/mpfr::mpreal
 	}
@@ -442,6 +520,16 @@ public:
 	CacheEntryID first_descendant() {
 		return first_descendant_;
 	}
+
+	void setPendingKey(PendingComponentKey key) { pending_key_ = std::move(key); }
+	PendingComponentKey& pendingKey() { return pending_key_; }
+	const PendingComponentKey& pendingKey() const { return pending_key_; }
+	void clearPendingKey() { pending_key_ = PendingComponentKey(); }
+	void setCompactKey(CompactComponentKey key) { compact_key_ = std::move(key); }
+	const CompactComponentKey& compactKey() const { return compact_key_; }
+	bool hasCompactKey() const { return !compact_key_.bytes.empty(); }
+	vector<RowTemplateID>& templateRefs() { return template_refs_; }
+	const vector<RowTemplateID>& templateRefs() const { return template_refs_; }
 };
 
 template <class T_data> class ComponentCache;
@@ -474,10 +562,13 @@ class ComponentCache {
 	unsigned long num_occupied_buckets_ = 0;
 	unsigned long my_time_ = 0;
 	CacheMode mode_ = CacheMode::LEGACY;
+	RowTemplatePool templates_;
 
 public:
 	void init(int cachesize, CacheMode mode);
 	bool bypass() const { return mode_ == CacheMode::BYPASS; }
+	bool residual() const { return mode_ == CacheMode::RESIDUAL; }
+	bool legacy() const { return mode_ == CacheMode::LEGACY; }
 
 	void add_descendant(CacheEntryID compid, CacheEntryID descendantid) {
 		assert(descendantid != entry(compid).first_descendant());
@@ -497,14 +588,7 @@ public:
 
 	//  ComponentCache(SolverConfiguration &conf, DataAndStatistics &statistics);
 
-	~ComponentCache() {
-		for (auto &pbucket : table_)
-			if (pbucket != nullptr)
-				delete pbucket;
-		for (auto &pentry : entry_base_)
-			if (pentry != nullptr)
-				delete pentry;
-	}
+	~ComponentCache();
 
 	CachedComponent<T_data> &entry(CacheEntryID id) {
 		assert(entry_base_.size() > id);
@@ -526,15 +610,7 @@ public:
 	CacheEntryID createEntryFor(Component &comp, unsigned stack_id, ComponentManager<T_data> & manager, const vec<lbool>& assigns);
 
 	// unchecked erase of an entry from entry_base_
-	void eraseEntry(CacheEntryID id) {
-		cache_bytes_memory_usage_ -= entry_base_[id]->SizeInBytes();
-		if (!bypass())
-			sum_size_cached_components_ -= entry_base_[id]->num_variables();
-		num_cached_components_--;
-		delete entry_base_[id];
-		entry_base_[id] = nullptr;
-		free_entry_base_slots_.push_back(id);
-	}
+	void eraseEntry(CacheEntryID id);
 
 	// store the number in model_count as the model count of CacheEntryID id
 	inline void storeValueOf(CacheEntryID id, const T_data &model_count, NodeIndex node=UNDEF_NODE);
@@ -553,11 +629,16 @@ public:
 	inline void cleanAllDescendantsOf(CacheEntryID id, int num_comps);
 
 	void printStats() const {
-		printf("c o Cache mode            = %s\n", bypass() ? "bypass" : "legacy");
+		const char* name = bypass() ? "bypass" : (residual() ? "residual" : "legacy");
+		printf("c o Cache mode            = %s\n", name);
 		printf("c o Cache lookup          = %"PRIu64"\n", num_cache_look_ups_);
 		printf("c o Cache hit             = %"PRIu64"\n", num_cache_hits_);
 		printf("c o Cache insert          = %"PRIu64"\n", num_cache_inserts_);
 		printf("c o Cache reduce          = %"PRIu64"\n", num_cache_reduce_);
+		printf("c o Template request      = %"PRIu64"\n", templates_.requests());
+		printf("c o Template reuse        = %"PRIu64"\n", templates_.reuses());
+		printf("c o Template wake         = %"PRIu64"\n", templates_.wakes());
+		printf("c o Template reclaim      = %"PRIu64"\n", templates_.reclaimed());
 	}
 	// --- Added by k-hasimt --- END
 
@@ -576,6 +657,10 @@ private:
 	// compute the size in bytes of the component cache from scratch
 	// the value is stored in bytes_memory_usage_
 	uint64_t recompute_bytes_memory_usage();
+	PendingComponentKey pendingKey(const ReferenceKey& key) const;
+	bool compactKey(const PendingComponentKey& pending, bool acquire,
+			CompactComponentKey& compact, vector<RowTemplateID>& references);
+	void releaseTemplates(CachedComponent<T_data>& component);
 
 	// removes the entry id from the hash table
 	// but not from the entry base
@@ -1141,7 +1226,10 @@ void ComponentCache<T_data>::cleanPollutionsInvolving(CacheEntryID id) {
 
 template <class T_data>
 void ComponentCache<T_data>::removeFromHashTable(CacheEntryID id) {
-	unsigned int v = clip(entry(id).hashkey());
+	if (residual() && !entry(id).hasCompactKey()) return;
+	unsigned int v = clip(residual()
+			? entry(id).compactKey().hash
+			: entry(id).hashkey());
 	if (isBucketAt(v))
 		for (auto it = table_[v]->begin(); it != table_[v]->end(); it++) {
 			if (*it == id) {
@@ -1193,17 +1281,31 @@ void ComponentCache<T_data>::storeValueOf(CacheEntryID id, const T_data &model_c
 			cleanPollutionsInvolving(entry(id).first_descendant());
 		return;
 	}
-	CacheBucket<T_data> &bucket = at(clip(entry(id).hashkey()));
 	// when storing the new model count the size of the model count
 	// and hence that of the component will change
 	cache_bytes_memory_usage_ -= entry(id).SizeInBytes();
+
+	unsigned int bucket_id;
+	if (residual()) {
+		CompactComponentKey key;
+		vector<RowTemplateID> references;
+		if (!compactKey(entry(id).pendingKey(), true, key, references))
+			throw logic_error("could not intern a residual component key");
+		entry(id).setCompactKey(std::move(key));
+		entry(id).templateRefs() = std::move(references);
+		entry(id).clearPendingKey();
+		bucket_id = clip(entry(id).compactKey().hash);
+	} else {
+		bucket_id = clip(entry(id).hashkey());
+	}
+	CacheBucket<T_data> &bucket = at(bucket_id);
 
 	entry(id).set_model_count(model_count);
 	entry(id).set_creation_time(my_time_);
 	entry(id).set_DTNode(node);
 	bucket.push_back(id);
 	num_cache_inserts_++;
-	cache_bytes_memory_usage_ += entry(id).SizeInBytes();
+	cache_bytes_memory_usage_ = recompute_bytes_memory_usage();
 }
 
 // --- Added by k-hasimt --- BEGIN

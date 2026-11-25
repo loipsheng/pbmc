@@ -283,9 +283,9 @@ SimpResult Simplifier<T_data>::bicp(PBcounter<T_data>& counter) {
 
 template <typename T_data>
 SimpResult Simplifier<T_data>::run(PBcounter<T_data>& counter) {
-	const SimpResult checked = basic(counter);
+	const SimpResult checked = basic(counter); // Basic
 	if (checked.status != SimpStatus::UNCHANGED) return checked;
-	return bicp(counter);
+	return bicp(counter); // BICP (AP + FLP)
 }
 
 template class Simplifier<mpz_class>;

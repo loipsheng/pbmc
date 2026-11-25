@@ -11,6 +11,7 @@ Use of this source code is governed by an MIT-style license that can be found in
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
+#include <iterator>
 
 using namespace GPMC;
 
@@ -230,9 +231,17 @@ ReferenceKey ComponentManager<T_data>::referenceKey(
 		} while (value != 0);
 	};
 	auto appendBig = [&](const rs::BigVal& value, vector<uint8_t>& output) {
-		const string text = value.str();
-		appendNumber(text.size(), output);
-		output.insert(output.end(), text.begin(), text.end());
+		if (value == 0) {
+			output.push_back(0);
+			return;
+		}
+		output.push_back(value > 0 ? 1 : 2);
+		rs::BigVal magnitude = value > 0 ? value : -value;
+		vector<uint8_t> bytes;
+		boost::multiprecision::export_bits(
+				magnitude, back_inserter(bytes), 8, true);
+		appendNumber(bytes.size(), output);
+		output.insert(output.end(), bytes.begin(), bytes.end());
 	};
 
 	unordered_map<Var, uint64_t> local;
@@ -355,7 +364,7 @@ ReferenceKey ComponentManager<T_data>::referenceKey(
 
 	sort(records.begin(), records.end());
 	ReferenceKey result;
-	appendNumber(1, result.bytes);
+	appendNumber(2, result.bytes);
 	appendNumber(variables.size(), result.bytes);
 	for (Var variable : variables)
 		appendNumber(static_cast<uint64_t>(variable), result.bytes);
@@ -463,7 +472,8 @@ int ComponentManager<T_data>::splitComponent(const vec<lbool>& assigns, const ve
 #endif
 #ifdef CACHE
 				// caching
-				CacheEntryID id = this->cache_.createEntryFor(*comp_stack_.back(), comp_stack_.size() - 1, *this);
+				CacheEntryID id = this->cache_.createEntryFor(
+						*comp_stack_.back(), comp_stack_.size() - 1, *this, assigns);
 				if (id != 0) {
 					comp_stack_.back()->set_id(id);
 					assert(cache_.hasEntry(id));

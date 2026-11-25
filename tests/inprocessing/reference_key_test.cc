@@ -99,5 +99,24 @@ int main() {
 	GPMC::ReferenceKey collision_right = changed_gap;
 	collision_right.hash = collision_left.hash;
 	if (collision_left == collision_right) return 7;
+
+	GPMC::RowTemplatePool templates;
+	GPMC::ReferenceKey template_a{{1, 2, 3}, 17};
+	GPMC::ReferenceKey template_b{{1, 2, 4}, 17};
+	if (templates.probe(template_a) != 0) return 8;
+	const GPMC::RowTemplateID id_a = templates.acquire(template_a);
+	if (id_a == 0 || templates.probe(template_a) != id_a) return 9;
+	templates.release(id_a);
+	if (templates.acquire(template_a) != id_a || templates.wakes() != 1)
+		return 10;
+	templates.release(id_a);
+	const GPMC::RowTemplateID id_b = templates.acquire(template_b);
+	if (id_b == 0 || id_b == id_a || templates.probe(template_b) != id_b)
+		return 11;
+	templates.release(id_b);
+	templates.reclaim(true);
+	if (templates.probe(template_a) != 0 || templates.probe(template_b) != 0 ||
+			templates.reclaimed() != 2)
+		return 12;
 	return 0;
 }

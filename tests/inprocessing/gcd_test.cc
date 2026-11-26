@@ -170,6 +170,11 @@ GPMC::Configuration gcdConfig(
 	config.cntr.ablation.insert(GPMC::SimpRule::BICP);
 	config.cntr.ablation.insert(GPMC::SimpRule::CARD);
 	config.cntr.ablation.insert(GPMC::SimpRule::SC);
+	config.cntr.ablation.insert(GPMC::SimpRule::RIR);
+	config.cntr.ablation.insert(GPMC::SimpRule::RPR);
+	config.cntr.ablation.insert(GPMC::SimpRule::RSR);
+	config.cntr.ablation.insert(GPMC::SimpRule::RUP);
+	config.cntr.ablation.insert(GPMC::SimpRule::SBLP);
 	if (!cs) config.cntr.ablation.insert(GPMC::SimpRule::CS);
 	return config;
 }

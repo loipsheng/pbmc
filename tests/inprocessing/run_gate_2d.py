@@ -106,14 +106,14 @@ def main() -> int:
     check_case(
         solver,
         cases / "backjump_without_lit.opb",
-        "-ablation=1:2:3:4:5:6",
+        "-ablation=1:2:3:4:5:6:7:8:9:10:11",
         "-vs=0",
         "-bjthd=0.99",
     )
     check_case(
         solver,
         cases / "backjump_without_lit.opb",
-        "-ablation=1:2:3:4:5:6",
+        "-ablation=1:2:3:4:5:6:7:8:9:10:11",
         "-vs=0",
         "-no-bj",
     )

@@ -1,13 +1,20 @@
 #include <gmpxx.h>
 
 #include <algorithm>
+#include <cmath>
 #include <map>
+#include <memory>
+#include <numeric>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 
 #include "mpfr/mpreal.h"
 #include "core/Counter.h"
+
+#ifdef PBMC_USE_GLPK
+#include <glpk.h>
+#endif
 
 namespace GPMC {
 
@@ -245,7 +252,38 @@ const EqGroup& Simplifier<T_data>::findGroup(
 }
 
 template <typename T_data>
-typename Simplifier<T_data>::CurrentRow Simplifier<T_data>::current(
+void Simplifier<T_data>::deactivate(
+		PBcounter<T_data>& counter, const RowInfo& row) {
+	if (row.group == NO_EQUALITY_GROUP) {
+		const CurrentRow staged = effective(counter, row);
+		if (!staged.active || !counter.simp_rows_.set(
+				row, staged.content, false, counter.decisionLevel()))
+			throw std::logic_error("failed to deactivate a simplification row");
+		return;
+	}
+
+	const EqGroup& group = findGroup(counter, row.group);
+	const RowInfo& lower_info = findRow(counter, group.lower);
+	const RowInfo& upper_info = findRow(counter, group.upper);
+	CurrentRow lower = effective(counter, lower_info);
+	CurrentRow upper = effective(counter, upper_info);
+	if (row.side == RowSide::LOWER) {
+		if (!lower.active) throw std::logic_error("inactive equality lower row");
+		lower.active = false;
+	} else if (row.side == RowSide::UPPER) {
+		if (!upper.active) throw std::logic_error("inactive equality upper row");
+		upper.active = false;
+	} else {
+		throw std::logic_error("invalid equality row side");
+	}
+	if (!counter.simp_rows_.setGroup(group,
+			lower.content, lower.active, upper.content, upper.active,
+			counter.decisionLevel()))
+		throw std::logic_error("failed to publish an equality transaction");
+}
+
+template <typename T_data>
+typename Simplifier<T_data>::CurrentRow Simplifier<T_data>::effective(
 		PBcounter<T_data>& counter, const RowInfo& row, bool overlay) {
 	CurrentRow result;
 	const SimpRow* changed = overlay
@@ -264,6 +302,13 @@ typename Simplifier<T_data>::CurrentRow Simplifier<T_data>::current(
 				: row.content;
 		result.active = row.state == RowState::ATTACHED;
 	}
+	return result;
+}
+
+template <typename T_data>
+typename Simplifier<T_data>::CurrentRow Simplifier<T_data>::current(
+		PBcounter<T_data>& counter, const RowInfo& row, bool overlay) {
+	CurrentRow result = effective(counter, row, overlay);
 	if (!result.active) return result;
 
 	rs::BigVal gap(result.content.rhs);
@@ -351,6 +396,36 @@ SimpResult Simplifier<T_data>::basic(PBcounter<T_data>& counter) {
 }
 
 template <typename T_data>
+SimpResult Simplifier<T_data>::imply(
+		PBcounter<T_data>& counter, rs::Lit literal) {
+	if (literal == 0 || counter.Pos[rs::toVar(literal)] != rs::INF)
+		throw std::logic_error(
+				"simplification tried to submit a non-new implication");
+
+	rs::CeArb reason = counter.cePools.takeArb();
+	for (int position : counter.trail_lim)
+		reason->addLhs(rs::BigCoef(1), -counter.trail[position]);
+	reason->addLhs(rs::BigCoef(1), literal);
+	reason->addRhs(rs::BigCoef(1));
+	reason->orig = rs::Origin::LEARNED;
+	reason->postProcess(counter.Level, counter.Pos, true, rs::stats);
+	if (reason->isTautology() || reason->isInconsistency())
+		throw std::logic_error("simplification produced an invalid guarded reason");
+
+	const rs::CRef cref = counter.attachConstraint(reason, false);
+	rs::Constr& attached = counter.ca[cref];
+	attached.setLBD(attached.size());
+	if (!rs::isTrue(counter.Level, literal))
+		throw std::logic_error(
+				"simplification reason did not propagate its implication");
+	if (counter.decisionLevel() > 0 &&
+			counter.Reason[rs::toVar(literal)] != cref)
+		throw std::logic_error(
+				"simplification implication has no live RoundingSat Reason");
+	return {SimpStatus::IMPLIED};
+}
+
+template <typename T_data>
 SimpResult Simplifier<T_data>::bicp(PBcounter<T_data>& counter) {
 	constexpr std::uint64_t max_candidates = 32;
 	constexpr std::uint64_t max_probe_work = 50000;
@@ -382,32 +457,6 @@ SimpResult Simplifier<T_data>::bicp(PBcounter<T_data>& counter) {
 
 	std::uint64_t node_work = 0;
 	bool budget_limited = candidate_limited;
-	auto commit = [&](rs::Lit implied) {
-		if (implied == 0 || counter.Pos[rs::toVar(implied)] != rs::INF)
-			throw std::logic_error("BICP tried to submit a non-new implication");
-
-		rs::CeArb reason = counter.cePools.takeArb();
-		for (int position : counter.trail_lim)
-			reason->addLhs(rs::BigCoef(1), -counter.trail[position]);
-		reason->addLhs(rs::BigCoef(1), implied);
-		reason->addRhs(rs::BigCoef(1));
-		reason->orig = rs::Origin::LEARNED;
-		reason->postProcess(counter.Level, counter.Pos, true, rs::stats);
-		if (reason->isTautology() || reason->isInconsistency())
-			throw std::logic_error("BICP produced an invalid guarded reason");
-
-		const rs::CRef cref = counter.attachConstraint(reason, false);
-		rs::Constr& attached = counter.ca[cref];
-		attached.setLBD(attached.size());
-		if (!rs::isTrue(counter.Level, implied))
-			throw std::logic_error("BICP reason did not propagate its implication");
-		if (counter.decisionLevel() > 0 &&
-				counter.Reason[rs::toVar(implied)] != cref)
-			throw std::logic_error("BICP implication has no live RoundingSat Reason");
-		counter.simp_stats.bicp_implied++;
-		return SimpResult{SimpStatus::IMPLIED};
-	};
-
 	for (rs::Var variable : candidates) {
 		if (node_work >= max_node_work) {
 			budget_limited = true;
@@ -556,11 +605,386 @@ SimpResult Simplifier<T_data>::bicp(PBcounter<T_data>& counter) {
 					implied = literal;
 			}
 		}
-		if (implied != 0) return commit(implied);
+		if (implied != 0) {
+			counter.simp_stats.bicp_implied++;
+			return imply(counter, implied);
+		}
 
 		if (budget_limited && node_work >= max_node_work) break;
 	}
 	return {budget_limited ? SimpStatus::BUDGET : SimpStatus::UNCHANGED};
+}
+
+template <typename T_data>
+SimpResult Simplifier<T_data>::sblp(PBcounter<T_data>& counter) {
+	if (counter.config.disabled(SimpRule::SBLP)) return {};
+#ifndef PBMC_USE_GLPK
+	return {};
+#else
+	constexpr std::uint64_t max_candidates = 16;
+	constexpr std::uint64_t max_mip_calls = 32;
+	constexpr std::uint64_t max_input_work = 50000;
+	constexpr std::uint64_t max_exact_work = 200000;
+	constexpr size_t max_exact_variables = 64;
+	constexpr double exact_seconds = 0.05;
+	constexpr double integer_tolerance = 1e-7;
+	const rs::BigVal exact_limit("9007199254740992");
+
+	if (counter.qhead != static_cast<int>(counter.trail.size()))
+		throw std::logic_error("SB-LP requires a RoundingSat propagation fixpoint");
+	counter.simp_stats.sblp_calls++;
+	struct Clock {
+		SimpStats& stats;
+		double start = Glucose::cpuTime();
+		~Clock() { stats.sblp_seconds += Glucose::cpuTime() - start; }
+	} clock{counter.simp_stats};
+
+	Component& component = counter.cmpmgr.topComponent();
+	std::unordered_set<ClID> current_rows;
+	current_rows.reserve(component.nlongCls());
+	for (int i = component.nVars() + 1;
+			i < component.nVars() + component.nlongCls() + 1; ++i)
+		current_rows.insert(component[i]);
+
+	std::vector<rs::Var> variables;
+	std::unordered_map<rs::Var, int> columns;
+	variables.reserve(component.nVars());
+	for (int i = 0; i < component.nVars(); ++i) {
+		const rs::Var variable = component[i] + 1;
+		if (counter.Pos[variable] != rs::INF) continue;
+		columns.emplace(variable, static_cast<int>(variables.size()) + 1);
+		variables.push_back(variable);
+	}
+	counter.simp_stats.sblp_variables += variables.size();
+	if (variables.empty()) return {};
+
+	std::vector<PBconstraint> residual_rows;
+	std::vector<PBconstraint> proof_rows;
+	std::uint64_t input_work = variables.size() + counter.trail.size();
+	for (const RowInfo& info : counter.rows_) {
+		if (info.state != RowState::ATTACHED) continue;
+		const ComponentBind& bind = counter.cmpmgr.rowBind(info.version);
+		if (!current_rows.count(bind.clid)) continue;
+
+		const CurrentRow mother = effective(counter, info, false);
+		if (mother.active) {
+			proof_rows.push_back(mother.content);
+			input_work += mother.content.lits.size();
+		}
+		const CurrentRow residual = current(counter, info);
+		if (!residual.active || !residual.open) continue;
+		residual_rows.push_back(residual.content);
+		input_work += residual.content.lits.size();
+	}
+	counter.simp_stats.sblp_rows += residual_rows.size();
+	if (residual_rows.empty()) return {};
+	if (input_work > max_input_work) {
+		counter.simp_stats.sblp_budgets++;
+		return {SimpStatus::BUDGET};
+	}
+
+	struct ModelRow {
+		std::map<int, rs::BigVal> terms;
+		rs::BigVal degree = 0;
+	};
+	std::vector<ModelRow> model;
+	model.reserve(residual_rows.size());
+	std::uint64_t nonzeros = 0;
+	auto in_exact_range = [&](rs::BigVal value) {
+		if (value < 0) value = -value;
+		return value <= exact_limit;
+	};
+	bool numeric_rejected = false;
+	for (const PBconstraint& row : residual_rows) {
+		ModelRow converted;
+		converted.degree = row.rhs;
+		for (size_t i = 0; i < row.lits.size(); ++i) {
+			const rs::Lit literal = static_cast<rs::Lit>(row.lits[i]);
+			const auto found = columns.find(rs::toVar(literal));
+			if (found == columns.end())
+				throw std::logic_error("SB-LP residual row escaped its component");
+			const rs::BigVal coefficient(row.coeffs[i]);
+			if (!in_exact_range(coefficient)) {
+				numeric_rejected = true;
+				break;
+			}
+			if (literal > 0) {
+				converted.terms[found->second] += coefficient;
+			} else {
+				converted.terms[found->second] -= coefficient;
+				converted.degree -= coefficient;
+			}
+		}
+		if (numeric_rejected) break;
+		rs::BigVal maximum = 0;
+		for (auto it = converted.terms.begin(); it != converted.terms.end();) {
+			if (it->second == 0) {
+				it = converted.terms.erase(it);
+				continue;
+			}
+			rs::BigVal magnitude = it->second;
+			if (magnitude < 0) magnitude = -magnitude;
+			maximum += magnitude;
+			if (!in_exact_range(it->second) || !in_exact_range(maximum)) {
+				numeric_rejected = true;
+				break;
+			}
+			++it;
+		}
+		if (numeric_rejected || !in_exact_range(converted.degree)) {
+			numeric_rejected = true;
+			break;
+		}
+		nonzeros += converted.terms.size();
+		model.push_back(std::move(converted));
+	}
+	if (numeric_rejected) {
+		counter.simp_stats.sblp_numeric_rejected++;
+		return {};
+	}
+
+	std::unordered_map<rs::Var, rs::Var> local_variable;
+	for (const PBconstraint& row : proof_rows)
+		for (Int literal : row.lits) {
+			const rs::Var variable = rs::toVar(static_cast<rs::Lit>(literal));
+			if (!local_variable.count(variable))
+				local_variable.emplace(variable, local_variable.size() + 1);
+		}
+	std::vector<PBconstraint> local_rows = proof_rows;
+	for (PBconstraint& row : local_rows)
+		for (Int& literal : row.lits) {
+			const rs::Lit global = static_cast<rs::Lit>(literal);
+			const rs::Var local = local_variable.at(rs::toVar(global));
+			literal = global > 0 ? local : -local;
+		}
+	std::vector<rs::Lit> local_trail;
+	for (rs::Lit literal : counter.trail) {
+		const auto found = local_variable.find(rs::toVar(literal));
+		if (found != local_variable.end())
+			local_trail.push_back(literal > 0 ? found->second : -found->second);
+	}
+
+	enum class ExactState : std::uint8_t {
+		PROVED,
+		REJECTED,
+		BASE_UNSAT,
+		UNKNOWN
+	};
+	struct ExactResult {
+		ExactState state = ExactState::UNKNOWN;
+		std::uint64_t work = 0;
+	};
+	struct ProofSolver final : rs::Solver {
+		bool add(const PBconstraint& row) {
+			rs::CeArb constraint = cePools.takeArb();
+			for (size_t i = 0; i < row.lits.size(); ++i)
+				constraint->addLhs(rs::BigCoef(row.coeffs[i]),
+						static_cast<rs::Lit>(row.lits[i]));
+			constraint->addRhs(rs::BigCoef(row.rhs));
+			constraint->orig = rs::Origin::FORMULA;
+			return addInputConstraint(constraint).second != rs::ID_Unsat;
+		}
+	};
+	auto exact = [&](rs::Lit implied) {
+		ExactResult result;
+		const auto local = local_variable.find(rs::toVar(implied));
+		if (local == local_variable.end() || local_variable.size() > max_exact_variables)
+			return result;
+
+		struct RestoreGlobals {
+			rs::Stats stats = rs::stats;
+			double time_limit = rs::options.time_limit.get();
+			~RestoreGlobals() {
+				rs::stats = stats;
+				rs::options.time_limit.get() = time_limit;
+			}
+		} restore;
+		const double deadline = restore.stats.getTime() + exact_seconds;
+		rs::Stats proof_stats{};
+		proof_stats.STARTTIME = restore.stats.STARTTIME;
+		proof_stats.RUNSTARTTIME = Glucose::cpuTime();
+		rs::stats = proof_stats;
+		if (restore.time_limit < 0 || deadline < restore.time_limit)
+			rs::options.time_limit.get() = deadline;
+
+		try {
+			ProofSolver proof;
+			proof.setNbVars(local_variable.size(), true);
+			for (const PBconstraint& row : local_rows)
+				if (!proof.add(row)) {
+					result.state = ExactState::BASE_UNSAT;
+					result.work = rs::stats.getDetTime();
+					return result;
+				}
+			for (rs::Lit literal : local_trail)
+				if (proof.addUnitConstraint(literal, rs::Origin::FORMULA).second ==
+						rs::ID_Unsat) {
+					result.state = ExactState::BASE_UNSAT;
+					result.work = rs::stats.getDetTime();
+					return result;
+				}
+
+			const rs::Lit opposite = implied > 0 ? -local->second : local->second;
+			rs::IntSet assumption(local_variable.size(), {opposite});
+			proof.setAssumptions(assumption);
+			while (true) {
+				const rs::SolveState state = proof.solve().state;
+				if (state == rs::SolveState::INPROCESSED ||
+						state == rs::SolveState::RESTARTED)
+					continue;
+				if (state == rs::SolveState::INCONSISTENT)
+					result.state = ExactState::PROVED;
+				else if (state == rs::SolveState::SAT)
+					result.state = ExactState::REJECTED;
+				else if (state == rs::SolveState::UNSAT)
+					result.state = ExactState::BASE_UNSAT;
+				break;
+			}
+		} catch (const rs::AsynchronousInterrupt&) {
+			if (rs::asynch_interrupt) throw;
+			result.state = ExactState::UNKNOWN;
+		}
+		result.work = rs::stats.getDetTime();
+		return result;
+	};
+
+	std::unique_ptr<glp_prob, decltype(&glp_delete_prob)>
+			lp(glp_create_prob(), &glp_delete_prob);
+	struct GlpkOutput {
+		int previous = glp_term_out(GLP_OFF);
+		~GlpkOutput() { glp_term_out(previous); }
+	} glpk_output;
+	glp_add_rows(lp.get(), model.size());
+	for (size_t row = 0; row < model.size(); ++row)
+		glp_set_row_bnds(lp.get(), row + 1, GLP_LO,
+				model[row].degree.template convert_to<double>(), 0.0);
+	glp_add_cols(lp.get(), variables.size());
+	for (size_t column = 0; column < variables.size(); ++column) {
+		glp_set_col_bnds(lp.get(), column + 1, GLP_DB, 0.0, 1.0);
+		glp_set_col_kind(lp.get(), column + 1, GLP_IV);
+	}
+	std::vector<int> row_index(1, 0);
+	std::vector<int> column_index(1, 0);
+	std::vector<double> values(1, 0.0);
+	row_index.reserve(nonzeros + 1);
+	column_index.reserve(nonzeros + 1);
+	values.reserve(nonzeros + 1);
+	for (size_t row = 0; row < model.size(); ++row)
+		for (const auto& term : model[row].terms) {
+			row_index.push_back(row + 1);
+			column_index.push_back(term.first);
+			values.push_back(term.second.template convert_to<double>());
+		}
+	glp_load_matrix(lp.get(), nonzeros,
+			row_index.data(), column_index.data(), values.data());
+
+	glp_smcp simplex;
+	glp_init_smcp(&simplex);
+	simplex.msg_lev = GLP_MSG_OFF;
+	simplex.tm_lim = 50;
+	glp_iocp integer;
+	glp_init_iocp(&integer);
+	integer.msg_lev = GLP_MSG_OFF;
+	integer.tm_lim = 50;
+	enum class MipState : std::uint8_t { OPTIMAL, INFEASIBLE, UNKNOWN };
+	struct MipResult {
+		MipState state = MipState::UNKNOWN;
+		double objective = 0.0;
+	};
+	auto optimize = [&](int direction) {
+		MipResult result;
+		counter.simp_stats.sblp_mip_calls++;
+		glp_set_obj_dir(lp.get(), direction);
+		const int simplex_result = glp_simplex(lp.get(), &simplex);
+		if (simplex_result == GLP_ENOPFS || simplex_result == GLP_ENOFEAS ||
+				glp_get_status(lp.get()) == GLP_NOFEAS) {
+			result.state = MipState::INFEASIBLE;
+			return result;
+		}
+		if (simplex_result != 0 || glp_get_status(lp.get()) != GLP_OPT)
+			return result;
+		const int integer_result = glp_intopt(lp.get(), &integer);
+		if (integer_result == GLP_ENOPFS || integer_result == GLP_ENOFEAS ||
+				glp_mip_status(lp.get()) == GLP_NOFEAS) {
+			result.state = MipState::INFEASIBLE;
+			return result;
+		}
+		if (integer_result != 0 || glp_mip_status(lp.get()) != GLP_OPT)
+			return result;
+		result.state = MipState::OPTIMAL;
+		result.objective = glp_mip_obj_val(lp.get());
+		return result;
+	};
+	auto integer_value = [&](double value, int expected) {
+		return std::isfinite(value) &&
+				std::fabs(value - static_cast<double>(expected)) <= integer_tolerance;
+	};
+
+	std::vector<rs::Var> candidates = variables;
+	bool budget = candidates.size() > max_candidates;
+	if (budget) candidates.resize(max_candidates);
+	std::uint64_t mip_calls = 0;
+	std::uint64_t exact_work = 0;
+	for (rs::Var variable : candidates) {
+		if (mip_calls + 2 > max_mip_calls || exact_work >= max_exact_work) {
+			budget = true;
+			break;
+		}
+		const int column = columns.at(variable);
+		glp_set_obj_coef(lp.get(), column, 1.0);
+
+		mip_calls++;
+		const MipResult minimum = optimize(GLP_MIN);
+		rs::Lit implied = 0;
+		if (minimum.state == MipState::INFEASIBLE) {
+			counter.simp_stats.sblp_unknown++;
+			glp_set_obj_coef(lp.get(), column, 0.0);
+			break;
+		}
+		if (minimum.state == MipState::UNKNOWN) {
+			counter.simp_stats.sblp_unknown++;
+			glp_set_obj_coef(lp.get(), column, 0.0);
+			continue;
+		}
+		if (integer_value(minimum.objective, 1)) {
+			implied = variable;
+		} else {
+			mip_calls++;
+			const MipResult maximum = optimize(GLP_MAX);
+			if (maximum.state == MipState::OPTIMAL &&
+					integer_value(maximum.objective, 0))
+				implied = -variable;
+			else if (maximum.state != MipState::OPTIMAL)
+				counter.simp_stats.sblp_unknown++;
+		}
+		glp_set_obj_coef(lp.get(), column, 0.0);
+		if (implied == 0) continue;
+
+		counter.simp_stats.sblp_candidates++;
+		counter.simp_stats.sblp_exact_checks++;
+		const ExactResult checked = exact(implied);
+		exact_work += checked.work;
+		counter.simp_stats.sblp_work += checked.work;
+		if (checked.work > max_exact_work || exact_work > max_exact_work)
+			budget = true;
+		if (checked.state == ExactState::PROVED) {
+			counter.simp_stats.sblp_exact_passed++;
+			counter.simp_stats.sblp_implied++;
+			return imply(counter, implied);
+		}
+		if (checked.state == ExactState::REJECTED)
+			counter.simp_stats.sblp_exact_rejected++;
+		else {
+			counter.simp_stats.sblp_unknown++;
+			if (checked.state == ExactState::UNKNOWN) budget = true;
+		}
+	}
+	if (budget) {
+		counter.simp_stats.sblp_budgets++;
+		return {SimpStatus::BUDGET};
+	}
+	return {};
+#endif
 }
 
 template <typename T_data>
@@ -1106,6 +1530,523 @@ SimpResult Simplifier<T_data>::sc(PBcounter<T_data>& counter) {
 }
 
 template <typename T_data>
+SimpResult Simplifier<T_data>::rir(PBcounter<T_data>& counter) {
+	if (counter.config.disabled(SimpRule::RIR)) return {};
+	if (counter.qhead != static_cast<int>(counter.trail.size()))
+		throw std::logic_error("RIR requires a RoundingSat propagation fixpoint");
+	counter.simp_stats.rir_calls++;
+
+	Component& component = counter.cmpmgr.topComponent();
+	std::unordered_set<ClID> current_rows;
+	current_rows.reserve(component.nlongCls());
+	for (int i = component.nVars() + 1;
+			i < component.nVars() + component.nlongCls() + 1; ++i)
+		current_rows.insert(component[i]);
+
+	for (const RowInfo& row : counter.rows_) {
+		if (row.state != RowState::ATTACHED) continue;
+		const ComponentBind& bind = counter.cmpmgr.rowBind(row.version);
+		if (!current_rows.count(bind.clid)) continue;
+
+		const CurrentRow residual = current(counter, row);
+		if (!residual.active) continue;
+		counter.simp_stats.rir_rows++;
+		if (row.group != NO_EQUALITY_GROUP)
+			counter.simp_stats.rir_equality_rows++;
+		if (residual.open) continue;
+
+		counter.simp_stats.rir_proposals++;
+		if (counter.cmpmgr.cache().legacy()) return {};
+
+		std::uint64_t removed = 0;
+		if (row.group == NO_EQUALITY_GROUP) {
+			const CurrentRow staged = effective(counter, row);
+			if (!staged.active || !counter.simp_rows_.set(
+					row, staged.content, false, counter.decisionLevel()))
+				throw std::logic_error("RIR failed to deactivate a satisfied row");
+			removed = 1;
+		} else {
+			const EqGroup& group = findGroup(counter, row.group);
+			const RowInfo& lower_info = findRow(counter, group.lower);
+			const RowInfo& upper_info = findRow(counter, group.upper);
+			CurrentRow lower = effective(counter, lower_info);
+			CurrentRow upper = effective(counter, upper_info);
+			const CurrentRow lower_residual = current(counter, lower_info);
+			const CurrentRow upper_residual = current(counter, upper_info);
+			if (lower.active && !lower_residual.open) {
+				lower.active = false;
+				removed++;
+			}
+			if (upper.active && !upper_residual.open) {
+				upper.active = false;
+				removed++;
+			}
+			if (removed == 0 || !counter.simp_rows_.setGroup(group,
+					lower.content, lower.active, upper.content, upper.active,
+					counter.decisionLevel()))
+				throw std::logic_error(
+						"RIR failed to deactivate a satisfied equality direction");
+		}
+		counter.simp_stats.rir_removed_rows += removed;
+		counter.simp_stats.rir_commits++;
+		return {SimpStatus::ROW_REMOVED};
+	}
+	return {};
+}
+
+template <typename T_data>
+SimpResult Simplifier<T_data>::rpr(PBcounter<T_data>& counter) {
+	if (counter.config.disabled(SimpRule::RPR)) return {};
+	if (counter.qhead != static_cast<int>(counter.trail.size()))
+		throw std::logic_error("RPR requires a RoundingSat propagation fixpoint");
+	counter.simp_stats.rpr_calls++;
+
+	struct NormalizedRow {
+		RowVersionID version = NO_ROW_VERSION;
+		EqualityGroupID group = NO_EQUALITY_GROUP;
+		std::vector<std::pair<Int, Int>> terms;
+		Int degree = 0;
+		std::uint64_t hash = 1469598103934665603ULL;
+		bool helper_safe = false;
+	};
+	struct Proposal {
+		RowVersionID target = NO_ROW_VERSION;
+		RowVersionID helper = NO_ROW_VERSION;
+	};
+
+	auto normalize = [&](const RowInfo& info, NormalizedRow& result) {
+		const CurrentRow row = current(counter, info);
+		if (!row.active || !row.open || row.content.coeffs.empty()) return false;
+		if (row.content.lits.size() != row.content.coeffs.size() ||
+				row.content.rhs <= 0)
+			throw std::logic_error("RPR found a malformed residual row");
+
+		Int divisor = 0;
+		for (Int coefficient : row.content.coeffs) {
+			if (coefficient <= 0)
+				throw std::logic_error("RPR found a non-positive coefficient");
+			divisor = std::gcd(divisor, coefficient);
+		}
+		if (divisor <= 0)
+			throw std::logic_error("RPR failed to normalize a residual row");
+
+		result = {};
+		result.version = info.version;
+		result.group = info.group;
+		result.helper_safe = counter.simp_rows_.find(info.version) == nullptr;
+		result.terms.reserve(row.content.lits.size());
+		for (size_t i = 0; i < row.content.lits.size(); ++i)
+			result.terms.emplace_back(
+					row.content.lits[i], row.content.coeffs[i] / divisor);
+		std::sort(result.terms.begin(), result.terms.end(),
+				[](const auto& left, const auto& right) {
+					return left.first < right.first;
+				});
+		result.degree = row.content.rhs / divisor +
+				(row.content.rhs % divisor == 0 ? 0 : 1);
+
+		auto mix = [&](std::uint64_t value) {
+			result.hash ^= value;
+			result.hash *= 1099511628211ULL;
+		};
+		mix(result.terms.size());
+		for (const auto& term : result.terms)
+			mix(static_cast<std::uint64_t>(term.first));
+		return true;
+	};
+	auto sameLhs = [](const NormalizedRow& left,
+			const NormalizedRow& right) {
+		return left.terms == right.terms;
+	};
+
+	Component& component = counter.cmpmgr.topComponent();
+	std::unordered_set<ClID> current_rows;
+	current_rows.reserve(component.nlongCls());
+	for (int i = component.nVars() + 1;
+			i < component.nVars() + component.nlongCls() + 1; ++i)
+		current_rows.insert(component[i]);
+
+	std::vector<NormalizedRow> rows;
+	std::unordered_map<std::uint64_t, std::vector<size_t>> buckets;
+	Proposal proposal;
+	for (const RowInfo& info : counter.rows_) {
+		if (info.state != RowState::ATTACHED) continue;
+		const ComponentBind& bind = counter.cmpmgr.rowBind(info.version);
+		if (!current_rows.count(bind.clid)) continue;
+
+		NormalizedRow row;
+		if (!normalize(info, row)) continue;
+		counter.simp_stats.rpr_rows++;
+		if (info.group != NO_EQUALITY_GROUP)
+			counter.simp_stats.rpr_equality_rows++;
+
+		std::vector<size_t>& bucket = buckets[row.hash];
+		for (size_t index : bucket) {
+			const NormalizedRow& previous = rows[index];
+			counter.simp_stats.rpr_pairs++;
+			if (!sameLhs(previous, row) ||
+					(previous.group != NO_EQUALITY_GROUP &&
+					 previous.group == row.group))
+				continue;
+
+			if (previous.degree > row.degree && previous.helper_safe) {
+				proposal.target = row.version;
+				proposal.helper = previous.version;
+			} else if (row.degree > previous.degree && row.helper_safe) {
+				proposal.target = previous.version;
+				proposal.helper = row.version;
+			} else if (previous.degree == row.degree &&
+					(previous.helper_safe || row.helper_safe)) {
+				const bool keep_previous = previous.helper_safe &&
+						(!row.helper_safe || previous.version < row.version);
+				proposal.target = keep_previous ? row.version : previous.version;
+				proposal.helper = keep_previous ? previous.version : row.version;
+			}
+			if (proposal.target != NO_ROW_VERSION) {
+				counter.simp_stats.rpr_proposals++;
+				break;
+			}
+		}
+		if (proposal.target != NO_ROW_VERSION) break;
+		bucket.push_back(rows.size());
+		rows.emplace_back(std::move(row));
+	}
+	if (proposal.target == NO_ROW_VERSION || counter.cmpmgr.cache().legacy())
+		return {};
+
+	counter.simp_stats.rpr_revalidations++;
+	const RowInfo& target_info = findRow(counter, proposal.target);
+	const RowInfo& helper_info = findRow(counter, proposal.helper);
+	NormalizedRow target;
+	NormalizedRow helper;
+	if (!normalize(target_info, target) || !normalize(helper_info, helper) ||
+			target.version == helper.version || !sameLhs(target, helper) ||
+			(target.group != NO_EQUALITY_GROUP && target.group == helper.group) ||
+			!helper.helper_safe ||
+			helper.degree < target.degree ||
+			(helper.degree == target.degree && target.helper_safe &&
+			 helper.version > target.version))
+		return {};
+
+	deactivate(counter, target_info);
+	counter.simp_stats.rpr_removed_rows++;
+	counter.simp_stats.rpr_commits++;
+	return {SimpStatus::ROW_REMOVED};
+}
+
+template <typename T_data>
+SimpResult Simplifier<T_data>::rsr(PBcounter<T_data>& counter) {
+	constexpr std::uint64_t max_pairs = 4096;
+	constexpr std::uint64_t max_work = 200000;
+	if (counter.config.disabled(SimpRule::RSR)) return {};
+	if (counter.qhead != static_cast<int>(counter.trail.size()))
+		throw std::logic_error("RSR requires a RoundingSat propagation fixpoint");
+	counter.simp_stats.rsr_calls++;
+
+	struct Row {
+		RowVersionID version = NO_ROW_VERSION;
+		EqualityGroupID group = NO_EQUALITY_GROUP;
+		PBconstraint content;
+		bool helper_safe = false;
+	};
+	struct Proposal {
+		RowVersionID target = NO_ROW_VERSION;
+		RowVersionID helper = NO_ROW_VERSION;
+	};
+
+	auto build = [&](const RowInfo& info, Row& result) {
+		const CurrentRow current_row = current(counter, info);
+		if (!current_row.active || !current_row.open ||
+				current_row.content.coeffs.empty())
+			return false;
+		result.version = info.version;
+		result.group = info.group;
+		result.content = current_row.content;
+		result.helper_safe = counter.simp_rows_.find(info.version) == nullptr;
+		return true;
+	};
+	auto entails = [&](const Row& helper, const Row& target,
+			std::uint64_t& work, bool& budget) {
+		const std::uint64_t cost = helper.content.lits.size() +
+				target.content.lits.size();
+		if (cost > max_work || work > max_work - cost) {
+			budget = true;
+			return false;
+		}
+		std::map<rs::Var, rs::BigVal> difference;
+		rs::BigVal constant = 0;
+		auto add = [&](const PBconstraint& row, int sign) {
+			for (size_t i = 0; i < row.lits.size(); ++i) {
+				const rs::Lit literal = static_cast<rs::Lit>(row.lits[i]);
+				const rs::BigVal value = sign * rs::BigVal(row.coeffs[i]);
+				const rs::Var variable = rs::toVar(literal);
+				if (literal > 0) {
+					difference[variable] += value;
+				} else {
+					constant += value;
+					difference[variable] -= value;
+				}
+			}
+		};
+		add(target.content, 1);
+		add(helper.content, -1);
+		work += cost;
+		counter.simp_stats.rsr_checks++;
+
+		rs::BigVal minimum = constant;
+		for (const auto& entry : difference)
+			if (entry.second < 0) minimum += entry.second;
+		return minimum >= rs::BigVal(target.content.rhs) -
+				rs::BigVal(helper.content.rhs);
+	};
+
+	Component& component = counter.cmpmgr.topComponent();
+	std::unordered_set<ClID> current_rows;
+	current_rows.reserve(component.nlongCls());
+	for (int i = component.nVars() + 1;
+			i < component.nVars() + component.nlongCls() + 1; ++i)
+		current_rows.insert(component[i]);
+
+	std::vector<Row> rows;
+	for (const RowInfo& info : counter.rows_) {
+		if (info.state != RowState::ATTACHED) continue;
+		const ComponentBind& bind = counter.cmpmgr.rowBind(info.version);
+		if (!current_rows.count(bind.clid)) continue;
+		Row row;
+		if (!build(info, row)) continue;
+		counter.simp_stats.rsr_rows++;
+		if (info.group != NO_EQUALITY_GROUP)
+			counter.simp_stats.rsr_equality_rows++;
+		rows.emplace_back(std::move(row));
+	}
+
+	std::uint64_t work = 0;
+	std::uint64_t pairs = 0;
+	bool budget = false;
+	Proposal proposal;
+	for (size_t i = 0; i < rows.size() && !budget; ++i) {
+		for (size_t j = i + 1; j < rows.size(); ++j) {
+			if (rows[i].group != NO_EQUALITY_GROUP &&
+					rows[i].group == rows[j].group)
+				continue;
+			if (pairs >= max_pairs) {
+				budget = true;
+				break;
+			}
+			pairs++;
+			counter.simp_stats.rsr_pairs++;
+			const bool first = rows[i].helper_safe &&
+					entails(rows[i], rows[j], work, budget);
+			if (budget) break;
+			const bool second = rows[j].helper_safe &&
+					entails(rows[j], rows[i], work, budget);
+			if (budget) break;
+			if (!first && !second) continue;
+
+			if (first && second) {
+				const bool keep_first = rows[i].version < rows[j].version;
+				proposal.helper = keep_first ? rows[i].version : rows[j].version;
+				proposal.target = keep_first ? rows[j].version : rows[i].version;
+			} else if (first) {
+				proposal.helper = rows[i].version;
+				proposal.target = rows[j].version;
+			} else {
+				proposal.helper = rows[j].version;
+				proposal.target = rows[i].version;
+			}
+			counter.simp_stats.rsr_proposals++;
+			break;
+		}
+		if (proposal.target != NO_ROW_VERSION) break;
+	}
+	counter.simp_stats.rsr_work += work;
+	if (proposal.target == NO_ROW_VERSION) {
+		if (!budget) return {};
+		counter.simp_stats.rsr_budgets++;
+		return {SimpStatus::BUDGET};
+	}
+	if (counter.cmpmgr.cache().legacy()) return {};
+
+	counter.simp_stats.rsr_revalidations++;
+	const RowInfo& target_info = findRow(counter, proposal.target);
+	const RowInfo& helper_info = findRow(counter, proposal.helper);
+	Row target;
+	Row helper;
+	if (!build(target_info, target) || !build(helper_info, helper) ||
+			target.version == helper.version || !helper.helper_safe ||
+			(target.group != NO_EQUALITY_GROUP && target.group == helper.group))
+		return {};
+	std::uint64_t verify_work = 0;
+	bool verify_budget = false;
+	if (!entails(helper, target, verify_work, verify_budget)) {
+		counter.simp_stats.rsr_work += verify_work;
+		if (verify_budget) {
+			counter.simp_stats.rsr_budgets++;
+			return {SimpStatus::BUDGET};
+		}
+		return {};
+	}
+	counter.simp_stats.rsr_work += verify_work;
+
+	deactivate(counter, target_info);
+	counter.simp_stats.rsr_removed_rows++;
+	counter.simp_stats.rsr_commits++;
+	return {SimpStatus::ROW_REMOVED};
+}
+
+template <typename T_data>
+SimpResult Simplifier<T_data>::rup(PBcounter<T_data>& counter) {
+	constexpr std::uint64_t max_targets = 32;
+	constexpr std::uint64_t max_work = 200000;
+	if (counter.config.disabled(SimpRule::RUP)) return {};
+	if (counter.qhead != static_cast<int>(counter.trail.size()))
+		throw std::logic_error("RUP requires a RoundingSat propagation fixpoint");
+	counter.simp_stats.rup_calls++;
+
+	struct Row {
+		RowVersionID version = NO_ROW_VERSION;
+		EqualityGroupID group = NO_EQUALITY_GROUP;
+		PBconstraint target;
+		PBconstraint mother;
+		bool helper_safe = false;
+	};
+	struct ProofSolver final : rs::Solver {
+		bool add(const PBconstraint& row, bool negate) {
+			rs::CeArb constraint = cePools.takeArb();
+			rs::BigCoef degree(row.rhs);
+			if (negate) {
+				rs::BigCoef total = 0;
+				for (Int coefficient : row.coeffs) total += coefficient;
+				degree = total - degree + 1;
+			}
+			for (size_t i = 0; i < row.lits.size(); ++i)
+				constraint->addLhs(rs::BigCoef(row.coeffs[i]),
+						negate ? -static_cast<rs::Lit>(row.lits[i])
+						       : static_cast<rs::Lit>(row.lits[i]));
+			constraint->addRhs(degree);
+			constraint->orig = rs::Origin::FORMULA;
+			constraint->postProcess(Level, Pos, true, rs::stats);
+			if (constraint->isTautology()) return false;
+			if (constraint->hasNegativeSlack(Level)) return true;
+			attachConstraint(constraint, true);
+			return static_cast<bool>(runPropagation(true));
+		}
+	};
+
+	Component& component = counter.cmpmgr.topComponent();
+	std::unordered_set<ClID> current_rows;
+	current_rows.reserve(component.nlongCls());
+	for (int i = component.nVars() + 1;
+			i < component.nVars() + component.nlongCls() + 1; ++i)
+		current_rows.insert(component[i]);
+
+	auto collect = [&]() {
+		std::vector<Row> result;
+		for (const RowInfo& info : counter.rows_) {
+			if (info.state != RowState::ATTACHED) continue;
+			const ComponentBind& bind = counter.cmpmgr.rowBind(info.version);
+			if (!current_rows.count(bind.clid)) continue;
+			const CurrentRow target = current(counter, info);
+			if (!target.active || !target.open || target.content.coeffs.empty())
+				continue;
+			Row row;
+			row.version = info.version;
+			row.group = info.group;
+			row.target = target.content;
+			row.helper_safe = counter.simp_rows_.find(info.version) == nullptr;
+			if (row.helper_safe) row.mother = effective(counter, info, false).content;
+			result.emplace_back(std::move(row));
+		}
+		return result;
+	};
+	auto cost = [&](const std::vector<Row>& rows, size_t target) {
+		std::uint64_t result = counter.trail.size() + rows[target].target.lits.size();
+		for (size_t i = 0; i < rows.size(); ++i) {
+			if (i == target || !rows[i].helper_safe) continue;
+			if (rows[i].mother.lits.size() > max_work ||
+					result > max_work - rows[i].mother.lits.size())
+				return max_work + 1;
+			result += rows[i].mother.lits.size();
+		}
+		return result;
+	};
+	auto prove = [&](const std::vector<Row>& rows, size_t target) {
+		struct RestoreStats {
+			rs::Stats saved;
+			~RestoreStats() { rs::stats = saved; }
+		} restore{rs::stats};
+		ProofSolver proof;
+		proof.setNbVars(counter.getNbVars(), true);
+		for (rs::Lit literal : counter.trail)
+			if (proof.addUnitConstraint(literal, rs::Origin::FORMULA).second ==
+					rs::ID_Unsat)
+				throw std::logic_error("RUP copied an inconsistent current trail");
+		for (size_t i = 0; i < rows.size(); ++i) {
+			if (i == target || !rows[i].helper_safe) continue;
+			if (proof.add(rows[i].mother, false))
+				throw std::logic_error("RUP helper formula is already inconsistent");
+		}
+		return proof.add(rows[target].target, true);
+	};
+
+	std::vector<Row> rows = collect();
+	for (const Row& row : rows) {
+		counter.simp_stats.rup_rows++;
+		if (row.group != NO_EQUALITY_GROUP)
+			counter.simp_stats.rup_equality_rows++;
+	}
+	std::uint64_t work = 0;
+	bool budget = rows.size() > max_targets;
+	RowVersionID proposal = NO_ROW_VERSION;
+	const size_t targets = std::min<std::uint64_t>(rows.size(), max_targets);
+	for (size_t i = 0; i < targets; ++i) {
+		counter.simp_stats.rup_targets++;
+		const std::uint64_t check_work = cost(rows, i);
+		if (check_work > max_work || work > max_work - check_work) {
+			budget = true;
+			break;
+		}
+		work += check_work;
+		counter.simp_stats.rup_checks++;
+		if (!prove(rows, i)) continue;
+		proposal = rows[i].version;
+		counter.simp_stats.rup_proofs++;
+		break;
+	}
+	counter.simp_stats.rup_work += work;
+	if (proposal == NO_ROW_VERSION) {
+		if (!budget) return {};
+		counter.simp_stats.rup_budgets++;
+		return {SimpStatus::BUDGET};
+	}
+	if (counter.cmpmgr.cache().legacy()) return {};
+
+	rows = collect();
+	size_t target = rows.size();
+	for (size_t i = 0; i < rows.size(); ++i)
+		if (rows[i].version == proposal) {
+			target = i;
+			break;
+		}
+	if (target == rows.size()) return {};
+	const std::uint64_t verify_work = cost(rows, target);
+	if (verify_work > max_work || work > max_work - verify_work) {
+		counter.simp_stats.rup_budgets++;
+		return {SimpStatus::BUDGET};
+	}
+	counter.simp_stats.rup_revalidations++;
+	counter.simp_stats.rup_checks++;
+	counter.simp_stats.rup_work += verify_work;
+	if (!prove(rows, target)) return {};
+
+	const RowInfo& target_info = findRow(counter, proposal);
+	deactivate(counter, target_info);
+	counter.simp_stats.rup_removed_rows++;
+	counter.simp_stats.rup_commits++;
+	return {SimpStatus::ROW_REMOVED};
+}
+
+template <typename T_data>
 SimpResult Simplifier<T_data>::run(PBcounter<T_data>& counter) {
 	const SimpResult checked = basic(counter); // Basic
 	if (checked.status != SimpStatus::UNCHANGED) return checked;
@@ -1113,6 +2054,10 @@ SimpResult Simplifier<T_data>::run(PBcounter<T_data>& counter) {
 	if (probed.status == SimpStatus::IMPLIED ||
 			probed.status == SimpStatus::CONFLICT)
 		return probed;
+	const SimpResult bounded = sblp(counter); // SB-LP
+	if (bounded.status == SimpStatus::IMPLIED ||
+			bounded.status == SimpStatus::CONFLICT)
+		return bounded;
 	const SimpResult saturated = cs(counter); // CS
 	if (saturated.status != SimpStatus::UNCHANGED) return saturated;
 	const SimpResult divided = gcd(counter); // GCD
@@ -1121,6 +2066,15 @@ SimpResult Simplifier<T_data>::run(PBcounter<T_data>& counter) {
 	if (cardinality.status != SimpStatus::UNCHANGED) return cardinality;
 	const SimpResult strengthened = sc(counter); // SC
 	if (strengthened.status != SimpStatus::UNCHANGED) return strengthened;
+	const SimpResult removed = rir(counter); // RIR
+	if (removed.status != SimpStatus::UNCHANGED) return removed;
+	const SimpResult parallel = rpr(counter); // RPR
+	if (parallel.status != SimpStatus::UNCHANGED) return parallel;
+	const SimpResult subset = rsr(counter); // RSR
+	if (subset.status != SimpStatus::UNCHANGED) return subset;
+	const SimpResult propagated = rup(counter); // RUP
+	if (propagated.status != SimpStatus::UNCHANGED) return propagated;
+	if (bounded.status == SimpStatus::BUDGET) return bounded;
 	return probed;
 }
 

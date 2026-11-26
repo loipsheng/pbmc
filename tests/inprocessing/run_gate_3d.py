@@ -90,16 +90,16 @@ def check_case(
     require_commit: bool = False,
 ) -> None:
     expected = count_models(instance)
-    empty = run(solver, instance, cache, "1:2:3:4:5:6")
-    sc = run(solver, instance, cache, "1:2:3:5:6")
+    empty = run(solver, instance, cache, "1:2:3:4:5:6:7:8:9:10:11")
+    sc = run(solver, instance, cache, "1:2:3:5:6:7:8:9:10:11")
     values = (count(empty, "empty"), count(sc, "SC"))
     if values != (expected, expected):
         raise AssertionError(f"{instance.name}: counts={values}, oracle={expected}")
     if cache == "legacy" and stable(empty.stdout, "empty") != stable(sc.stdout, "SC"):
         raise AssertionError(f"{instance.name}: legacy view-only SC changed the search")
-    if "c o simplification ablation = Basic, BICP, CS, GCD, Cardinality, SC" not in empty.stdout:
+    if "c o simplification ablation = Basic, BICP, CS, GCD, Cardinality, SC, RIR, RPR, RSR, RUP, SB-LP" not in empty.stdout:
         raise AssertionError("empty simplifier ablation was not reported")
-    if "c o simplification ablation = Basic, BICP, CS, GCD, Cardinality" not in sc.stdout:
+    if "c o simplification ablation = Basic, BICP, CS, GCD, Cardinality, RIR, RPR, RSR, RUP, SB-LP" not in sc.stdout:
         raise AssertionError("SC-only ablation was not reported")
     if stat(empty.stdout, "SC calls", "empty") != 0:
         raise AssertionError("ablated SC was called")

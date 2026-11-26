@@ -8,7 +8,7 @@
 >
 > **v1.1 的重要限制**：新框架只允许普通 MC（当前 `-mode=0`）且关闭 d-DNNF；`-mode=1/2/3` 全部拒绝进入新简化框架。PMC/WMC/WPMC 的既有测试只保留在审计记录中，不属于实施范围。0B/0E 的 Release 与 ASan/UBSan 基线已经通过；`-simp-cache=bypass` 已作为整次运行不 lookup/store 的安全无复用 oracle，Legacy 不是结构改写模式。
 
-> **2026-11-26 当前停止点**：Gate 0B、0E、1、Basic、BICP、Cache Bypass、residual cache、CS、GCD、RoundingSat Cardinality normalization 与 Pairwise Multi-row SC residual-view commit、EqualityGroup 原子 overlay/undo、ComponentManager 动态 overlay 读取，以及 cache entry 入口快照/模板引用 ownership 已实现，并通过当前 22 项 Release 与 ASan/UBSan 测试。Pairwise SC 使用最新 residual target、当前 trail 下的 immutable attached 母版 helper、提交前精确重验证和一次一系数事务，仍不改 attached RoundingSat 约束或 Reason。下一模块是 4A RIR：只处理约束的可撤销 active 状态，不重复 Basic 已完成的检查。
+> **2026-11-26 当前停止点**：Gate 0B、0E、1、Basic、BICP、Cache Bypass、residual cache、CS、GCD、RoundingSat Cardinality normalization、Pairwise Multi-row SC、scoped RIR、RPR、Generalized RSR、RUP 与 Gate 5-LP-1 SB-LP 已实现；EqualityGroup 原子 overlay/undo、ComponentManager 动态 overlay 读取，以及 cache entry 入口快照/模板引用 ownership 也已接通。默认关闭 GLPK 的 Release 为 30/30；显式启用 `PBMC_USE_GLPK` 后 Release 为 32/32，ASan+UBSan 为 32/32（当前 ptrace 执行环境不能启用 LeakSanitizer）。Gate 4E 审计确认：在禁止变量代换/消元的当前范围内，Equality-specific 没有超过“两个 canonical 方向同时作为普通活动行、分别运行现有规则”的独立能力，因此状态为 `NOT IMPLEMENTED`，不增加空 `equality()`、重复 pass 或消融编号。下一模块是 5-LP-2 SC-LP；继续坚持 GLPK/MIP 只产生候选、隔离的精确 PB checker 决定提交。
 
 ---
 
@@ -647,11 +647,26 @@ $$
 
 ### 7.1 关卡 4A：RIR（`Simplifier::rir()`）
 
-- 将 BasicCheck 提供的 `gap<=0` 恒真、`gap>U` 冲突状态转成**当前作用域可撤销的结果**。BasicCheck 不重复正式失活；RIR 只在一次正确验证后提交 active-mask 的变化或冲突返回。
+- 将 BasicCheck 提供的 `gap<=0` 恒真状态转成**当前作用域可撤销的结果**。`gap>U` 是当前真实节点冲突，必须已由 RoundingSat 原生传播发现；RIR 不建立第二条冲突分析路径，也不把内部检查异常伪装成普通删除。
+- **Basic 与 RIR 不等价**：Basic 是传播不动点后的只读审计，检查是否仍有漏掉的冲突或强制赋值，并把行分类为 open/satisfied；它不写 overlay。RIR 只消费其中“当前 trail 已满足”的状态并正式发布可回跳 inactive mask，使后续约束规则、分量与 cache 读取统一 active 状态；它不重复实现传播或冲突学习。两者目前会重复读取满足条件，等约束阶段冻结后才允许评估合并扫描，不能提前混合职责。
 - 已满足行本来就被 `searchComponent()` 忽略，因此先验证本规则是否仅做已有功能的增量维护；不必为了“技术数”制造重复扫描。
 - 禁止永久删除一个只在当前分支已满足的约束；undo 后必须恢复。
 
 **验收**：满足约束不再连接分量、回跳后恢复；BasicCheck 和 RIR 不重复计算收益或因子。
+
+#### 2026-11-26 Gate 4A scoped active mask（PASS）
+
+- 对规范 Boolean PB residual `sum(a_i*l_i)>=gap`，未赋值文字的独立区间最小贡献为 0，因此 EDPLLSim 的 interval RIR 在这里精确退化为 `gap<=0`：当前 trail 已经单独满足该行。`Simplifier::rir()` 只消费这一状态；`gap>available` 仍属于原生传播/冲突分析，不由 RIR 返回新的 `CONFLICT`。
+- 新增短共享读取 `effective()`：它返回未按 trail 消元的最新 overlay/母版内容与 active 状态；原 `current()` 在其上构造当前 residual。RIR 用 `current()` 证明已满足，用 `effective()` 原样 staging 内容，因此提交只改变 active-mask，不夹带系数、gap 或文字改写。
+- 正式顺序为 `CS → GCD → Cardinality → SC → RIR`，调用行标注 `// RIR`。每次调用最多提交一条 standalone 行或一个 EqualityGroup；等式两个方向以一次 `setGroup()` 事务发布，其中当前已满足的活动方向置为 inactive，未满足方向及 ROOT_TRUE sibling 保持原状态。
+- Legacy 只记录 proposal，不发布 overlay；Bypass/Residual 返回 `ROW_REMOVED`，主循环重新进入传播与简化。active-mask 按 decision level 进入现有 `SimpRows` undo；非根回跳恢复父 scope，兄弟分支不会继承上一分支的满足状态。
+- attached `Constr/CRef`、allocator、watch、solver logical ID 和 live `Reason` 全部不变。等式单测让一个方向成为传播 Reason 后再原子失活两个已满足方向，确认 Reason 仍引用原 attached 行；回跳后 overlay 两边同时撤销。
+- `ComponentManager::searchComponent()` 和 `referenceKey()` 在 RIR 前已经按相同 trail 检测 `gap<=0` 并跳过满足行，所以 RIR 前后的分量、cache key 与稳定搜索统计相同。本关的工程收益是显式、可撤销的 active 状态，供后续 RPR/RSR/RUP 统一过滤；不把已有动态过滤重复统计成新 decomposition。
+- `-ablation` 仍是单一入口，新增调试编号 7（RIR）。统计为 calls/rows/equality rows/proposals/removed rows/commits；所有旧 Gate 的单项测试都显式禁用 ID 7，避免新规则污染历史消融。
+- `rir-test` 覆盖正/负文字、真正 open 反例、standalone commit、EqualityGroup 原子事务、live Reason、attached 内容不变、Legacy、Bypass、Residual、ablation、cache key 等价和回跳恢复。`run_gate_4a.py` 覆盖 `>=`、`<=`、`=`、桥接行、组件/回跳、三种 cache 模式及 20 个固定 seed 随机 exact MC oracle；Release 24/24、`ASAN_OPTIONS=detect_leaks=0` 下 ASan+UBSan 24/24 通过。
+- Sanitizer 首轮发现专项测试把根层已蕴含的 `x1` 再次 `decide(1)`；修正为无根蕴含的 `x1+x2+x3>=2` open 反例后全套通过。该失败属于测试夹具错误，没有关闭断言或改写原生传播。
+- 真实算法仍只在 `core/simplify.h/.cc` 增加 `rir()`；`Config.*`、`Counter.cc`、CMake 与测试仅增加同一个消融编号、统计和验收入口，并已同步 `pbmc-mod/core`。没有创建规则专属源码或伪代码文档。
+- 限制：本关只删除“当前赋值已经满足”的单行，不证明由其他保留约束蕴含的冗余，也不永久删除 attached solver row。canonical 平行/正比例行删除属于下一 Gate 4B RPR；一般双行蕴含属于 RSR，传播证明属于 RUP。
 
 ### 7.2 关卡 4B：RPR（`Simplifier::rpr()`）
 
@@ -660,7 +675,19 @@ $$
 - 对互补方向，不得把不一致等式当作普通平行冗余删除；检查约束方向和 canonical literal polarity。
 - hash 只筛选 bucket；**完整行内容+degree 精确比较**后才能删除。任何写入 overlay 的删除要通过“当前其余保留公式蕴含目标行”验证。
 
-**验收**：行重排/哈希碰撞/取反文字/多 RHS/等式展开测试；无 false delete；删除桥接行使分量数增加时 exact count 一致。
+**验收**：行重排/哈希碰撞/取反文字/多 RHS/等式展开测试；无 false delete；活动行数、residual cache identity 与回跳恢复正确。RPR 的正比例行具有相同 literal support，保留行仍连接相同变量，因此 **RPR 本身不应被要求增加分量数**；删除不同 support 的桥接冗余行并产生新分量属于下一关 RSR 的验收范围。
+
+#### 2026-11-26 Gate 4B RPR（PASS）
+
+- `Simplifier::rpr()` 在原生传播不动点、RIR 之后运行，调用行标注 `// RPR`。它只扫描当前 top component 中 active 且 open 的最新 residual 行；不读取已失活行，也不修改 attached `Constr/CRef`、watch、allocator 或 `Reason`。
+- 对每行的正系数向量取精确 GCD `g`，按 signed literal 排序后构造 primitive LHS，并把阈值变为 `ceil(rhs/g)`。因为 primitive LHS 在布尔赋值上取整数值，`gL>=rhs` 与 `L>=ceil(rhs/g)` 完全等价；同 primitive LHS 中阈值较大的行蕴含较小者，阈值相同则固定保留较小 `RowVersionID`，从而禁止两条等价行互相删除。
+- bucket hash 只编码排序后的 signed-literal support，故不同系数但相同 support 会故意进入同一 bucket；候选仍须比较完整 primitive `(literal, coefficient)` 向量。提交前重新读取 target/helper 并再次验证 LHS、阈值、版本 tie-break 和 EqualityGroup 身份，hash collision 不能直接成为删除证明。
+- 每次调用最多删除一个方向。standalone 通过 `SimpRows::set()` 失活；等式方向通过现有 `setGroup()` 与 sibling 一起原子发布，但 sibling 的 content/active 原样保留。同一 EqualityGroup 的两个方向禁止互为 helper；重复 equality group 可逐次由同方向的另一组证明，两个方向仍各有独立证明且每次事务可回跳。
+- Legacy 只统计 proposal，不重验、不写 overlay；Bypass/Residual 才返回 `ROW_REMOVED`。新的 ID 8 继续复用唯一 `-ablation` 入口；统计为 calls/rows/equality rows/pairs/proposals/revalidations/removed rows/commits。所有旧单项 Gate 已显式禁用 ID 8，保持历史消融隔离。
+- `rpr-test` 覆盖多 RHS 强弱链、正比例与行重排、负文字、真实 hash 同桶但不同系数反例、decision-scope commit/rollback、attached/Reason/allocator 不变、重复 EqualityGroup 原子事务、Legacy/Bypass/Residual 与 ablation。`run_gate_4b.py` 覆盖 `>=`、`<=`、`=`、分支才可能平行的行、三种 cache 模式和 20 个固定 seed 的重排重复行，并逐例与独立穷举 MC oracle 对照。
+- Release 26/26 通过；`ASAN_OPTIONS=detect_leaks=0` 下 ASan+UBSan 26/26 通过。`core/{Config,Counter,simplify}.*` 与 `pbmc-mod/core` 对应文件逐字节一致。
+- 实现中确认：RoundingSat 在 canonicalization 时可能先饱和系数，使某些“原输入正比例”行不再具有相同 canonical LHS；此时 RPR 正确地 no-change，一般蕴含留给 RSR，不能放宽完整 LHS 判等来制造 false delete。RPR 删除前后保留行 support 相同，因此只减少活动行与 residual key 体积，不会新增 component split。
+- Gate 4C 审计补充了依赖保护：RPR helper 现在也必须是本作用域无 overlay 的 attached 母版行；target 仍可读取最新 residual。专项测试人为给强平行 helper 发布 active overlay，确认 RPR 不会让可能依赖其他行的改写结果反向删除其证明前提。
 
 ### 7.3 关卡 4C：Generalized RSR（`Simplifier::rsr()`）
 
@@ -674,9 +701,22 @@ $$
 则 `C_i` 蕴含 `C_j`，可删 `C_j`；允许有常数项和正负文字，按逐变量有符号系数计算最小值。带正比例的版本另作为增强选项，不与基础版同时改。
 - 示例 `3x+2y>=3` 蕴含 `4x+3y+z>=3`；反例 `3x+y>=3` 与 `x+3y>=3` **互不蕴含**，不得删。
 - 在某当前公式中按顺序删除时每次证明基于“尚保留的其余约束”；禁止两条互相蕴含的行在同一批次都因对方存在而被删。
+- 当前 overlay 尚未携带 Multi-row SC 的显式 proof-dependency stamp。为避免“SC 用 B 改写 A，随后又用 A 删除 B”的循环论证，首版 RSR 只允许**本作用域没有 overlay 的 attached 母版行**作为 helper；target 仍读取最新 residual 内容。CS/GCD/Cardinality 的独立等价 overlay 也会被保守排除为 helper，宁可少删不能 false delete。以后若要放宽，必须先增加可回跳的传递依赖并证明 helper 删除后仍有非循环前提链。
 - 不把“RSR 调用成功”自动等同于新增 decomposition；实际测新连通分量的变化。
 
-**验收**：精确 entailment oracle、反向极性、不同 RHS、哈希桶/候选索引、重算失效、undo、普通 MC、缓存 Bypass。
+**验收**：精确 entailment oracle、反向极性、不同 RHS、固定候选对/文字预算、提交前重算、undo、普通 MC、缓存 Bypass。一般不同-support 蕴含不存在类似 RPR 的“同 LHS hash”必要条件，首版不得为了建桶而漏掉合法候选；以后增加索引必须保持完整性并以全对扫描作 oracle。
+
+#### 2026-11-26 Gate 4C Generalized RSR（PASS）
+
+- `Simplifier::rsr()` 在 `RIR → RPR` 之后运行，调用行标注 `// RSR`。对 helper `L_h>=k_h` 和 target `L_t>=k_t`，将正文字 `a*x` 与负文字 `a*(1-x)` 精确转换为“常数 + 变量系数”，计算 `L_t-L_h` 的每变量独立布尔最小值；仅当该值不小于 `k_t-k_h` 时接受 `helper ⇒ target`。所有运算使用 `rs::BigVal`，不做浮点或机器整数乘法判定。
+- 首版只允许当前作用域没有 `SimpRows` overlay 的 attached 行作为 helper，target 使用最新 active/open residual。这个保守条件阻断 Multi-row SC/RPR/RSR 之间的循环证明；CS/GCD/Cardinality 的独立等价 overlay 也暂时被排除为 helper，属于少命中而非正确性缺口。
+- 每轮枚举无序行对，两个方向分别精确检查；若互相蕴含，固定保留较小 `RowVersionID`。同一 EqualityGroup 的 sibling 禁止互为 helper，每次只删除一个方向，提交前重新读取并重算证明。RPR/RSR 共用短方法 `deactivate()`，standalone 用 `set()`，equality 用 `setGroup()` 原子发布，不复制两套 active-mask 代码。
+- 固定预算为每次最多 4096 个行对、200000 个文字工作量；耗尽返回 `BUDGET`，主搜索照常进入分解，绝不把 UNKNOWN 当冲突、无解或“目标不冗余”。Legacy 只记录 proposal；Bypass/Residual 才重验并返回 `ROW_REMOVED`。
+- 新增唯一消融编号 9（RSR）；统计为 calls/rows/equality rows/pairs/checks/proposals/revalidations/removed rows/commits/work/budgets。所有旧 Gate 显式禁用 ID 9，保持既有单项消融隔离。
+- `rsr-test` 覆盖 support 子集、一般系数、负文字、不同 RHS、系数/极性反例、EqualityGroup 单方向原子失活、live Reason target、attached CRef/allocator 不变、decision rollback、Legacy/Bypass/Residual、ablation、overlay helper 循环阻断，以及同一状态下 bridge 删除前 1 个组件、删除后 2 个组件。
+- `run_gate_4c.py` 覆盖 `>=`、`<=` 经前端 canonicalization 后的 signed literal、`=`、bridge、两类 false-delete 反例、三种 cache 模式和 20 个固定 seed 的不同-support 冗余行；每例与独立穷举普通 MC oracle 对照。bridge 的 exact MC 为 12。
+- Release 28/28 通过；`ASAN_OPTIONS=detect_leaks=0` 下 ASan+UBSan 28/28 通过；`core/{Config,Counter,simplify}.*` 与 `pbmc-mod/core` 对应文件逐字节一致。
+- 限制：当前差值全局最小值是精确计算的**充分条件**，但不是完整 PB entailment 判定；证明失败只能 no-change。需要联合传播才能发现的冗余属于下一关 RUP。显式传递 proof-dependency stamp 尚未实现，因此 overlay helper 保持保守禁用。
 
 ### 7.4 关卡 4D：RUP（`Simplifier::rup()`）
 
@@ -694,6 +734,17 @@ $$
 
 **验收**：有证明删除、无证明不删、目标行依赖污染、含负文字/等式/当前分支、deep undo/非顺序回跳、普通 MC 全通过。
 
+#### 2026-11-26 Gate 4D RUP（PASS）
+
+- `Simplifier::rup()` 在 `RIR → RPR → RSR` 后运行，调用行标注 `// RUP`。目标使用当前 active/open residual；对 `C:sum a_i*l_i>=k` 精确构造 `neg C:sum a_i*~l_i>=sum(a_i)-k+1`，系数和与 degree 使用 `rs::BigCoef`，不做浮点判断或 `long` 累加。
+- 每次检查创建一个函数局部 `ProofSolver : rs::Solver`，不增加新命名空间或长期公共对象。proof context 先复制当前 trail 为根 unit，再装入当前 top component 中除 target 外、没有 `SimpRows` overlay 的 active/open attached 母版行，最后加入 `neg C`；不复制 solver learned constraints，不使用 target 自身，不作 decision、完整 SAT 搜索或冲突学习。只有 RoundingSat 原生 UP 在加入精确否定时冲突才得到 RUP 充分证明。
+- proof context 完全独立于主 solver；RoundingSat 的全局 `rs::stats` 在每次 proof 前保存、退出时恢复。专项测试逐项核对主 trail、Reason、constraints 数量、attached CRef/ID 和 allocator 位置不变。即使 target 仍是某个当前赋值的 live Reason，也只发布 residual inactive mask，不销毁或原地修改 attached constraint；回跳继续由既有 `SimpRows::undo()` 恢复。
+- 首版固定每次最多检查 32 个 target、累计 200000 个 trail/row literal 工作量；初次 proof 与提交前重新收集/复验都计入预算。目标数、工作量或复验预算耗尽返回 `BUDGET`，按 UNKNOWN 进入正常分解，不返回冲突、不删除行。每次最多提交一个 target；Legacy 只记录 proof proposal，Bypass/Residual 才复验并调用共用 `deactivate()`。
+- EqualityGroup 仍按单方向证明、双方向同 transaction 原子发布 active 状态；`rup-test` 覆盖联合传播可证、不可证、负文字、一般系数、等式单方向、overlay helper 阻断、learned-constraint 污染阻断、当前分支、二层非顺序回跳、live Reason、预算 UNKNOWN、Legacy/Bypass/Residual 和消融编号 10。
+- `run_gate_4d.py` 覆盖 `>=`、规范化后的 `<=`、`=`、当前分支、不可证反例、三种 cache 模式和 12 个固定 seed 的 signed-literal 联合传播实例；全部与独立穷举普通 MC oracle 对照。所有旧 Gate 显式禁用 ID 10，Gate 2A 的非法编号检查相应移到 11。
+- Release 30/30 通过；`ASAN_OPTIONS=detect_leaks=0` 下 ASan+UBSan 30/30 通过；`core/{Config,Counter,simplify}.*` 与 `pbmc-mod/core` 对应文件逐字节一致。
+- 限制：RUP 冲突是可靠的蕴含充分证书，但 UP 不完备，未冲突只能 no-change。为避免 Multi-row SC/RPR/RSR/RUP 的循环证明，任何 active overlay 行仍不能作为 helper；proof context 只读取当前 top component 的干净母版行和当前 scope trail。当前仍是 counting residual-view 失活，不是物理删除 solver constraint，也不支持 PMC/WMC/WPMC/d-DNNF。
+
 ### 7.5 Equality-specific Simplification（`Simplifier::equality()`，独立扩展）
 
 这是一项独立增强，不等于第 1.4 节的强制 Equality-aware 兼容层。通用规则即使关闭本方法，也必须正确处理 equality 的两个方向。
@@ -703,6 +754,15 @@ Equality-specific 首次实现前必须在本指南中回答“相比分别处�
 - 删除整个 equality 必须在排除该 group 两个方向后，分别精确证明保留系统蕴含 lower 与 upper；不得用 sibling 互相证明后同时删除。
 - 成组改写一次生成两个新不可变 row version，并以一个 undo marker 发布；任一方向 proof/attach/cache staging 失败则整组回滚。
 - 若精确定义与小实例不能显示超过“两个普通 `>=` 行分别运行现有规则”的新增效果，则该技术保持未实现，不为凑技术数增加重复 pass。
+
+#### 2026-11-26 Gate 4E 独立增益审计（NOT IMPLEMENTED）
+
+- 当前 `EqualityGroup` 已把 `L>=b` 与精确 canonical upper 作为两个同时活动的普通行交给原生 UP、BICP 和 RUP；证明外部 target 时，RUP 的隔离 context 会同时装入两个方向。所谓“联合传播得到更紧界”没有新增 proof system，只是重复调用现有 RoundingSat UP。
+- CS、GCD、Cardinality 和 Multi-row SC 对某一方向产生改写时，已经通过 `setGroup()` 把该方向的新内容与 sibling 当前内容放进同一 transaction；另一个方向随后按同一通用规则处理。额外的“成组 canonical replacement”入口不会得到不同模型集合或更强结果。
+- 整个 equality 冗余也不需要新规则：现有 RUP 先在排除 lower 的 context 中证明 lower，再在 lower 已 inactive、排除 upper 的 context 中仅用外部保留公式证明 upper。`count_main()` 对每次 `ROW_REMOVED` 立即回到传播/简化循环，两个方向都处理完之后才进入分解/cache，因此不存在中间单方向状态被缓存的问题。
+- 实证实例 `x1+x2=1`，外部两对约束分别联合推出 `x1` 与 `~x2`；RUP-only residual 运行得到独立穷举 MC=16、PBMC exact MC=16、proofs=2、removed rows=2、commits=2。第二个方向的证明发生在第一个方向已 inactive 后，排除了 sibling 循环证明。
+- 在现有禁区外能找到的真实新增能力只有用等式做变量代换/消元、Gaussian elimination、或向目标加入等式的有符号倍数以改变 support；前两者被本关明确禁止，后者属于更一般的 Multi-row SC/SC-LP 而不是独立 equality pass。
+- 结论：不新增 `Simplifier::equality()`、配置编号、统计或测试源码；保留 Equality-aware 通用基础设施。若以后放开变量代换/消元，必须作为新的独立设计关重新证明自由变量计数、Reason、分量和 cache 语义，不能复用本次 `NOT IMPLEMENTED` 结论作为授权。
 
 ### 7.6 SB-LP、SC-LP、RIR-LP 尚不入主干
 
@@ -756,6 +816,16 @@ void undoTo(int level) {
 - 执行结束标记 `complete_fixpoint` 或 `budget_limited`，不把预算耗尽误说成理论不动点。
 
 **注意**：候选选择、候选数、探测/MIP 时间本身也属于成本统计。`m^2` 行比较可通过 occurrence、签名和 top-Q 候选降低，但“平均复杂度下降”必须由真实测量支持。
+
+当前已实现预算如下：
+
+- BICP：最多 32 个候选变量、每个方向 probe work 最多 50000、每节点累计最多 200000；因此最多启动 64 次双向 probe，实际可因工作量提前结束。
+- SB-LP：最多 16 个候选变量、32 次 MIP 调用、50000 个 residual 输入文字工作量；每个 GLPK simplex 与 intopt 各设 50 ms 上限。隔离 exact checker 最多接收 64 个局部变量、单次 0.05 秒、每节点累计最多 200000 确定性输入工作量；任一上限耗尽只返回 `BUDGET`/no-change。
+- Pairwise Multi-row SC：最多 8 个 helper、128 个候选 pair、每对最多 4 个 ratio，累计最多 200000 个精确检查工作量；提交前复验也必须留在预算内。
+- Generalized RSR：每次最多 4096 个无序行对，两个蕴含方向分别检查，累计最多 200000 个 helper/target 文字工作量；复验另计预算。
+- RUP：每次最多检查 32 个 target、累计最多 200000 个输入文字工作量。一次 proof 的确定性费用是当前 trail 长度、target 文字数及全部可用无 overlay 母版 helper 文字数之和；提交前重新收集并复验时再计一次。当前这是输入规模预算，不是墙钟预算，也不能在一次 RoundingSat `runPropagation(true)` 内按 watch 访问硬中断。
+- Basic、CS、GCD、Cardinality、RIR 是单次线性或单行操作，当前不设独立预算；RPR 通过同 LHS hash 分桶限制实际比较，但尚无硬预算，若以后放宽为一般候选扫描必须补充 pair/work 上限。
+- 后续 SC-LP、RIR-LP 必须同样限制候选数、LP/MIP 调用数、精确复核工作量和单节点累计工作；LP 超时、UNKNOWN、数值异常或精确复核未通过都只能 no-change。
 
 ---
 
@@ -967,16 +1037,33 @@ PBMC row canonicalizer 至少执行：按全局变量与极性排序、合并重
 
 PBMC 的变量固定为 Boolean，输入是带正/负文字的 `sum(a_i*l_i)>=degree`。装入 GLPK 前必须先在当前 residual scope 展开 `~x=1-x`，得到带符号的 `x` 系数和正确常数项；可以转成 `<=` 后复用 EDPLLSim 方向，也可以使用 `GLP_LO`，但全项目只能选择一种并用 exact oracle 校验。不得直接把 PB 的 `degree` 当成 EDPLLSim 的 `b`。
 
-### 11.2 SB-LP（`Simplifier::sbLP()`）
+### 11.2 SB-LP（`Simplifier::sblp()`）
 
 - 在当前活动 residual 系统下，对候选未赋值 Boolean 变量求 `min x` 和 `max x`。GLPK/MIP 返回 `min=1` 时只产生 `x=1` 候选，返回 `max=0` 时只产生 `x=0` 候选；其他结果不固定。
 - 每个候选必须再由 RoundingSat 精确验证相反假设导致冲突，并生成合法 PB Reason；验证失败或预算耗尽返回 UNKNOWN。不能把 GLPK 的 double 目标值直接写入 trail。
 - 当前真实系统被 GLPK 判 infeasible 时，也必须由原生 PB 冲突路径复核后才能作为节点冲突。
 - 复用 EDPLLSim 的 representability guard 和状态处理，但 Boolean reason、trail、回跳、ComponentManager 与 cache 接入必须按 PBMC 重写。
 
+Gate 5-LP-1 的实际首版设计如下：
+
+- 运行位置固定在 `BICP → SB-LP → CS`；只处理当前 top component 的未赋值变量和活动 residual 行，`=` 已由 `EqualityGroup` 展开成两个同时入模的方向；
+- GLPK 行统一使用 `GLP_LO`。对每个负文字按 `a*~x=a-a*x` 展开，把常数移到 RHS；列为 `0/1 + GLP_IV`。方法保持短名 `sblp()`，不新增规则专属文件；
+- 默认关闭的构建选项为 `PBMC_USE_GLPK`；显式打开构建后，运行时只沿用一个 `-ablation=11` 控制 SB-LP，不增加第二套运行开关；
+- 每次最多处理 16 个候选变量、启动 32 次 MIP、接收 50000 个 residual 输入文字工作量。每个 GLPK 候选再使用隔离 RoundingSat、当前 trail、全部 attached 母版行和相反 literal assumption 做完整 SAT 检查；单次 checker 使用 0.05 秒局部上限，累计 deterministic work 上限 200000；
+- checker 仅在相反 assumption 返回 `INCONSISTENT` 时接受候选。`SAT`、`INPROCESSED` 后超时、数值异常、GLPK UNKNOWN、checker UNKNOWN，或返回 `UNSAT` 表明当前 proof context 本身已不一致时，均 no-change；首版不把 GLPK infeasible 或隔离 checker 的 base-UNSAT 冒充主搜索冲突；
+- 接受后复用 BICP 的 guarded PB Reason 形式：当前决策文字的反文字加 implied literal，attach 为 RoundingSat learned constraint，再由正式传播设置 trail/Reason。attached 母版与既有 Reason 不原地修改，回跳由现有 solver 生命周期处理。
+
 **验收**：普通 MC brute-force、正负文字、当前赋值后的 residual 常数、`2^53`/`3e9` 边界、GLPK unknown、精确复核成功/失败、Reason 生命周期和回跳。
 
-### 11.3 SC-LP（`Simplifier::scLP()`）
+**Gate 5-LP-1 实现结果（PASS）**：
+
+- `sblp()` 已按上述位置接入统一 `simplify.cc/.h`；构建默认不依赖 GLPK，只有 `-DPBMC_USE_GLPK=ON` 时探测头文件和库，运行时使用统一 `-ablation=11`；`pbmc-mod/core` 已与 `core` 机械同步。
+- 当前活动 residual 行按 `GLP_LO` 建模，负文字展开、当前 trail unit、等式双方向和大整数 representability guard 已实现。所有行系数、累积 L1 范围和调整后 RHS 不能在 double 连续整数区间内精确表示时，在调用 MIP 前拒绝候选。
+- GLPK 只筛选 `min(x)=1` 或 `max(x)=0` 候选；隔离 RoundingSat checker 使用母版行、当前 trail 和反向 assumption，且仅 `INCONSISTENT` 可提交。`SAT`、base `UNSAT`、超时、UNKNOWN、浮点/预算异常均 no-change；提交复用 BICP 的 guarded learned PB Reason，不原地修改 attached row 或仍被 trail 引用的 Reason。
+- 单元测试覆盖正反固定、非根 Reason/回跳、等式双方向、故意伪造的 GLPK 假候选被 exact checker 拒绝、`3e9`、大于 `2^53` 的入模前拒绝、候选预算和消融；集成测试以独立穷举 MC 覆盖 `>=`、负文字、`<=`、`=`、三种 cache 模式及 12 个固定随机种子。默认 Release 30/30，GLPK Release 32/32，ASan+UBSan 32/32。
+- 已知边界：现有 ComponentManager 的 gap 存储仍要求 `int`，因此原始 residual gap 超过 `INT_MAX` 的完整实例会在 SB-LP 之后的既有分解路径被拒绝；本关只在 SB-LP 单元层验证大于 `2^53` 的安全 no-change，不把该既有全局整数边界混入 LP 模块修复。当前 ptrace 环境不支持 LeakSanitizer，故消毒器结果只声明 ASan+UBSan。
+
+### 11.3 SC-LP（`Simplifier::sclp()`）
 
 SC-LP 与第 6.4 节使用**同一个等价定理**，区别只在于余项下界的候选器可以联合当前全部活动辅助行，而不是只看一条 helper。对目标行与目标项
 
@@ -1019,7 +1106,7 @@ z+w>=1
 
 **验收**：至少覆盖上述联合例、目标行污染、候选 L 偏大后 exact checker 拒绝、相反文字、`>2^53` 拒绝、GLPK UNKNOWN、一次一系数、helper 失活、回跳/兄弟分支、Bypass/residual cache 与完整模型集合比较。
 
-### 11.4 RIR-LP（`Simplifier::rirLP()`）
+### 11.4 RIR-LP（`Simplifier::rirlp()`）
 
 - 对目标 `C:L>=degree`，在 `F\{C}` 下最小化 `L`；只有 GLPK 提出 `min L>=degree` 且 exact RUP/native checker 再次证明 `F\{C}∧¬C` 冲突时，才能删除 C。
 - 若 GLPK 认为 `F\{C}` 不可满足或认为加入 C 后不可满足，只能生成冲突候选，仍交给原生 PB 冲突验证；不能直接返回当前节点 0。
@@ -1172,9 +1259,15 @@ resource: wall_time, cpu_time, peak_RSS, ASan/UBSan status
 | GCD | PASS（residual-view commit） | 复用统一 current residual row 与 RoundingSat `divideByGCD()`；只处理 saturated row；EqualityGroup 原子发布；attached row/Reason 不变 | Gate 3B + Reason/rollback + exact MC oracle |
 | Cardinality normalization | PASS（residual-view commit） | 短 wrapper 复用 `simplifyToCardinality(true)`；只发布等价 residual 内容，不创建物理 Cardinality propagator；EqualityGroup/Reason/GC 安全 | Gate 3C + postProcess parity + exact MC oracle |
 | Pairwise Multi-row SC | PASS（residual-view commit） | 最新 residual target + frozen attached 母版 helper；提交前重验证、一次一系数；EqualityGroup 原子 overlay；attached row/Reason 不变 | Gate 3D + full model-set/batch/Reason/rollback oracle |
+| RIR | PASS（scoped active-mask commit） | 仅失活当前 trail 已满足方向；一次一行/EqualityGroup 原子事务；原生分解/key 已动态跳过同一行，故不宣称新增 split | Gate 4A + Reason/rollback/cache-key/exact MC oracle |
+| RPR | PASS（parallel-row active-mask commit） | primitive LHS 精确 GCD/ceil 归一；support hash 后完整系数重验；逐次保留强阈值；EqualityGroup 原子事务；相同 support 故不宣称新增 split | Gate 4B + collision/equality/rollback/cache/exact MC oracle |
+| Generalized RSR | PASS（exact difference-bound commit） | `min(L_target-L_helper)` 精确充分条件；仅无 overlay 母版 helper；逐次重验删除；可删不同 support bridge 并新增 split | Gate 4C + false-delete/Reason/equality/dependency/split/cache/exact MC oracle |
+| RUP | PASS（isolated-UP active-mask commit） | 独立 RoundingSat proof context；当前 trail + 无 overlay 母版 helper；排除 target/learned；精确否定冲突后复验；主 solver 状态不变 | Gate 4D + proof/no-proof/dependency/Reason/equality/deep-undo/budget/cache/exact MC oracle |
+| Equality-specific | NOT IMPLEMENTED（无独立增益） | 联合传播、逐方向规范化、整组冗余已分别由现有两方向 + setGroup/RUP 覆盖；剩余新增能力均落入被禁止的变量消元或后续 SC-LP | Gate 4E 数学/源码审计 + 双方向外部蕴含小实例 |
+| SB-LP | PASS（GLPK candidate + isolated exact checker） | `sblp()`；signed-literal `GLP_LO` 0/1 MIP；`>2^53` no-change；反向 assumption 仅 `INCONSISTENT` 提交；guarded Reason；构建默认关闭、消融 ID 11 | Gate 5-LP-1 + 三种 cache + brute-force MC + sanitizer |
 | Residual overlay | PASS（存储/撤销/读取层） | 单行 revision；EqualityGroup 两方向共享 transaction 并原子回跳；ComponentManager 使用 frozen occurrence 超集并过滤 inactive/removed term | overlay unit + ReferenceKey/split test |
 
-**当前继续位置**：实现 Gate 4A `Simplifier::rir()`。先核对 Basic 当前对 satisfied/conflict 的只读处理和 `ComponentManager::effectiveRow()` 对 inactive overlay 的过滤，只提交当前 scope 可撤销的 active 状态；不得永久删除仅由当前 trail 满足的行，不重复计算 Basic 收益，也不在本关进入 RPR/RSR/RUP。Legacy 继续只读，Bypass/Residual 使用既有单行/EqualityGroup overlay；attached row、Reason 和 cache entry 入口快照保持不变。
+**当前继续位置**：Gate 5-LP-2 SC-LP。继续前重新查看第 6.4、8.4、9 和 11.3 节；优化模型与 exact checker 都必须排除目标行以及依赖目标行的派生行，只允许一次提交一个目标系数，并在提交后回到 `CS→GCD→Cardinality→传播`。本关只实现 SC-LP，不顺带进入 RIR-LP 或 Adaptive K；优先复用 SB-LP 的 GLPK 状态、representability guard、预算和隔离 checker 基础设施，不能复制第二套冗长框架。
 
 ---
 

@@ -25,7 +25,12 @@ enum class SimpRule : std::uint8_t {
 	CS = 3,
 	SC = 4,
 	GCD = 5,
-	CARD = 6
+	CARD = 6,
+	RIR = 7,
+	RPR = 8,
+	RSR = 9,
+	RUP = 10,
+	SBLP = 11
 };
 
 struct ConfigCounter {

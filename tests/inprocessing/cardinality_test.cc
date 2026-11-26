@@ -224,6 +224,11 @@ GPMC::Configuration cardConfig(
 	config.cntr.ablation.insert(GPMC::SimpRule::BICP);
 	config.cntr.ablation.insert(GPMC::SimpRule::CS);
 	config.cntr.ablation.insert(GPMC::SimpRule::SC);
+	config.cntr.ablation.insert(GPMC::SimpRule::RIR);
+	config.cntr.ablation.insert(GPMC::SimpRule::RPR);
+	config.cntr.ablation.insert(GPMC::SimpRule::RSR);
+	config.cntr.ablation.insert(GPMC::SimpRule::RUP);
+	config.cntr.ablation.insert(GPMC::SimpRule::SBLP);
 	if (!gcd) config.cntr.ablation.insert(GPMC::SimpRule::GCD);
 	return config;
 }

@@ -116,6 +116,11 @@ int main() {
 		config.cntr.ablation.insert(GPMC::SimpRule::GCD);
 		config.cntr.ablation.insert(GPMC::SimpRule::CARD);
 		config.cntr.ablation.insert(GPMC::SimpRule::SC);
+		config.cntr.ablation.insert(GPMC::SimpRule::RIR);
+		config.cntr.ablation.insert(GPMC::SimpRule::RPR);
+		config.cntr.ablation.insert(GPMC::SimpRule::RSR);
+	config.cntr.ablation.insert(GPMC::SimpRule::RUP);
+	config.cntr.ablation.insert(GPMC::SimpRule::SBLP);
 		TestCounter counter(config);
 		counter.init();
 		if (!counter.prepare(kPropagationFormula, true) || !counter.nativeReasonAndGC())
@@ -129,6 +134,11 @@ int main() {
 		config.cntr.ablation.insert(GPMC::SimpRule::GCD);
 		config.cntr.ablation.insert(GPMC::SimpRule::CARD);
 		config.cntr.ablation.insert(GPMC::SimpRule::SC);
+		config.cntr.ablation.insert(GPMC::SimpRule::RIR);
+		config.cntr.ablation.insert(GPMC::SimpRule::RPR);
+		config.cntr.ablation.insert(GPMC::SimpRule::RSR);
+	config.cntr.ablation.insert(GPMC::SimpRule::RUP);
+	config.cntr.ablation.insert(GPMC::SimpRule::SBLP);
 		TestCounter counter(config);
 		counter.init();
 		if (!counter.prepare(kPropagationFormula) || !counter.detectsMissedPropagation())
@@ -143,6 +153,11 @@ int main() {
 		config.cntr.ablation.insert(GPMC::SimpRule::GCD);
 		config.cntr.ablation.insert(GPMC::SimpRule::CARD);
 		config.cntr.ablation.insert(GPMC::SimpRule::SC);
+		config.cntr.ablation.insert(GPMC::SimpRule::RIR);
+		config.cntr.ablation.insert(GPMC::SimpRule::RPR);
+		config.cntr.ablation.insert(GPMC::SimpRule::RSR);
+	config.cntr.ablation.insert(GPMC::SimpRule::RUP);
+	config.cntr.ablation.insert(GPMC::SimpRule::SBLP);
 		TestCounter counter(config);
 		counter.init();
 		if (!counter.prepare(kPropagationFormula) || !counter.ablationSkipsBasic())
@@ -156,6 +171,11 @@ int main() {
 		config.cntr.ablation.insert(GPMC::SimpRule::GCD);
 		config.cntr.ablation.insert(GPMC::SimpRule::CARD);
 		config.cntr.ablation.insert(GPMC::SimpRule::SC);
+		config.cntr.ablation.insert(GPMC::SimpRule::RIR);
+		config.cntr.ablation.insert(GPMC::SimpRule::RPR);
+		config.cntr.ablation.insert(GPMC::SimpRule::RSR);
+	config.cntr.ablation.insert(GPMC::SimpRule::RUP);
+	config.cntr.ablation.insert(GPMC::SimpRule::SBLP);
 		TestCounter counter(config);
 		counter.init();
 		if (!counter.prepare(kCleanupFormula) || !counter.keepsFormulaDuringCleanup())

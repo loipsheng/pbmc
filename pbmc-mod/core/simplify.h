@@ -93,6 +93,20 @@ struct SimpStats {
 	std::uint64_t bicp_unsat = 0;
 	std::uint64_t bicp_implied = 0;
 	std::uint64_t bicp_work = 0;
+	std::uint64_t sblp_calls = 0;
+	std::uint64_t sblp_rows = 0;
+	std::uint64_t sblp_variables = 0;
+	std::uint64_t sblp_mip_calls = 0;
+	std::uint64_t sblp_candidates = 0;
+	std::uint64_t sblp_exact_checks = 0;
+	std::uint64_t sblp_exact_passed = 0;
+	std::uint64_t sblp_exact_rejected = 0;
+	std::uint64_t sblp_numeric_rejected = 0;
+	std::uint64_t sblp_unknown = 0;
+	std::uint64_t sblp_implied = 0;
+	std::uint64_t sblp_work = 0;
+	std::uint64_t sblp_budgets = 0;
+	double sblp_seconds = 0.0;
 	std::uint64_t cs_calls = 0;
 	std::uint64_t cs_rows = 0;
 	std::uint64_t cs_equality_rows = 0;
@@ -120,6 +134,42 @@ struct SimpStats {
 	std::uint64_t sc_commits = 0;
 	std::uint64_t sc_work = 0;
 	std::uint64_t sc_budgets = 0;
+	std::uint64_t rir_calls = 0;
+	std::uint64_t rir_rows = 0;
+	std::uint64_t rir_equality_rows = 0;
+	std::uint64_t rir_proposals = 0;
+	std::uint64_t rir_removed_rows = 0;
+	std::uint64_t rir_commits = 0;
+	std::uint64_t rpr_calls = 0;
+	std::uint64_t rpr_rows = 0;
+	std::uint64_t rpr_equality_rows = 0;
+	std::uint64_t rpr_pairs = 0;
+	std::uint64_t rpr_proposals = 0;
+	std::uint64_t rpr_revalidations = 0;
+	std::uint64_t rpr_removed_rows = 0;
+	std::uint64_t rpr_commits = 0;
+	std::uint64_t rsr_calls = 0;
+	std::uint64_t rsr_rows = 0;
+	std::uint64_t rsr_equality_rows = 0;
+	std::uint64_t rsr_pairs = 0;
+	std::uint64_t rsr_checks = 0;
+	std::uint64_t rsr_proposals = 0;
+	std::uint64_t rsr_revalidations = 0;
+	std::uint64_t rsr_removed_rows = 0;
+	std::uint64_t rsr_commits = 0;
+	std::uint64_t rsr_work = 0;
+	std::uint64_t rsr_budgets = 0;
+	std::uint64_t rup_calls = 0;
+	std::uint64_t rup_rows = 0;
+	std::uint64_t rup_equality_rows = 0;
+	std::uint64_t rup_targets = 0;
+	std::uint64_t rup_checks = 0;
+	std::uint64_t rup_proofs = 0;
+	std::uint64_t rup_revalidations = 0;
+	std::uint64_t rup_removed_rows = 0;
+	std::uint64_t rup_commits = 0;
+	std::uint64_t rup_work = 0;
+	std::uint64_t rup_budgets = 0;
 	double seconds = 0.0;
 };
 
@@ -138,18 +188,27 @@ public:
 	static SimpResult run(PBcounter<T_data>& counter);
 
 private:
+	static CurrentRow effective(
+			PBcounter<T_data>& counter, const RowInfo& row, bool overlay = true);
 	static CurrentRow current(
 			PBcounter<T_data>& counter, const RowInfo& row, bool overlay = true);
 	static const RowInfo& findRow(
 			PBcounter<T_data>& counter, RowVersionID version);
 	static const EqGroup& findGroup(
 			PBcounter<T_data>& counter, EqualityGroupID group);
+	static void deactivate(PBcounter<T_data>& counter, const RowInfo& row);
+	static SimpResult imply(PBcounter<T_data>& counter, int literal);
 	static SimpResult basic(PBcounter<T_data>& counter);
 	static SimpResult bicp(PBcounter<T_data>& counter);
+	static SimpResult sblp(PBcounter<T_data>& counter);
 	static SimpResult cs(PBcounter<T_data>& counter);
 	static SimpResult gcd(PBcounter<T_data>& counter);
 	static SimpResult card(PBcounter<T_data>& counter);
 	static SimpResult sc(PBcounter<T_data>& counter);
+	static SimpResult rir(PBcounter<T_data>& counter);
+	static SimpResult rpr(PBcounter<T_data>& counter);
+	static SimpResult rsr(PBcounter<T_data>& counter);
+	static SimpResult rup(PBcounter<T_data>& counter);
 };
 
 } // namespace GPMC

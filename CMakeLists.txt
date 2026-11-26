@@ -4,6 +4,16 @@ set(CMAKE_CXX_STANDARD 17)
 
 option(PBMC_STATIC_BUILD "build pbmc as a static execution file" off)
 option(RS_LOWER_PREC "Int256 instead of mpz_int in parts of roundingsat" ON)
+option(PBMC_USE_GLPK "enable GLPK-backed LP simplification candidates" OFF)
+
+if(PBMC_USE_GLPK)
+  find_path(PBMC_GLPK_INCLUDE_DIR glpk.h)
+  find_library(PBMC_GLPK_LIBRARY NAMES glpk)
+  if(NOT PBMC_GLPK_INCLUDE_DIR OR NOT PBMC_GLPK_LIBRARY)
+    message(FATAL_ERROR
+      "PBMC_USE_GLPK=ON requires glpk.h and libglpk; install GLPK or disable the option")
+  endif()
+endif()
 
 link_directories(/usr/local/lib)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/flow-cutter-pace17/src ${CMAKE_CURRENT_SOURCE_DIR}/roundingsat /usr/local/include)
@@ -45,6 +55,11 @@ target_compile_definitions(pbmc
   PRIVATE $<$<CONFIG:Debug>:DEBUG>
            __STDC_FORMAT_MACROS __STDC_LIMIT_MACROS
 )
+if(PBMC_USE_GLPK)
+  target_compile_definitions(pbmc PRIVATE PBMC_USE_GLPK=1)
+  target_include_directories(pbmc PRIVATE ${PBMC_GLPK_INCLUDE_DIR})
+  target_link_libraries(pbmc PUBLIC ${PBMC_GLPK_LIBRARY})
+endif()
 
 add_executable(pbmc-bin core/Main.cc)
 set_target_properties(pbmc-bin PROPERTIES OUTPUT_NAME pbmc)
@@ -107,6 +122,38 @@ if(BUILD_TESTING)
     pbmc roundingsat flowcutter z mpfr gmp gmpxx
   )
   add_test(NAME gate_3d_sc_committed_unit COMMAND sc-test)
+
+  add_executable(rir-test tests/inprocessing/rir_test.cc)
+  target_link_libraries(rir-test
+    pbmc roundingsat flowcutter z mpfr gmp gmpxx
+  )
+  add_test(NAME gate_4a_rir_unit COMMAND rir-test)
+
+  add_executable(rpr-test tests/inprocessing/rpr_test.cc)
+  target_link_libraries(rpr-test
+    pbmc roundingsat flowcutter z mpfr gmp gmpxx
+  )
+  add_test(NAME gate_4b_rpr_unit COMMAND rpr-test)
+
+  add_executable(rsr-test tests/inprocessing/rsr_test.cc)
+  target_link_libraries(rsr-test
+    pbmc roundingsat flowcutter z mpfr gmp gmpxx
+  )
+  add_test(NAME gate_4c_rsr_unit COMMAND rsr-test)
+
+  add_executable(rup-test tests/inprocessing/rup_test.cc)
+  target_link_libraries(rup-test
+    pbmc roundingsat flowcutter z mpfr gmp gmpxx
+  )
+  add_test(NAME gate_4d_rup_unit COMMAND rup-test)
+
+  if(PBMC_USE_GLPK)
+    add_executable(sblp-test tests/inprocessing/sblp_test.cc)
+    target_link_libraries(sblp-test
+      pbmc roundingsat flowcutter z mpfr gmp gmpxx
+    )
+    add_test(NAME gate_5_lp1_sblp_unit COMMAND sblp-test)
+  endif()
 
   add_executable(overlay-test tests/inprocessing/overlay_test.cc)
   target_link_libraries(overlay-test
@@ -182,5 +229,37 @@ if(BUILD_TESTING)
               ${CMAKE_CURRENT_SOURCE_DIR}/tests/inprocessing/run_gate_3d.py
               --solver $<TARGET_FILE:pbmc-bin>
     )
+    add_test(
+      NAME gate_4a_rir
+      COMMAND ${PYTHON_EXECUTABLE}
+              ${CMAKE_CURRENT_SOURCE_DIR}/tests/inprocessing/run_gate_4a.py
+              --solver $<TARGET_FILE:pbmc-bin>
+    )
+    add_test(
+      NAME gate_4b_rpr
+      COMMAND ${PYTHON_EXECUTABLE}
+              ${CMAKE_CURRENT_SOURCE_DIR}/tests/inprocessing/run_gate_4b.py
+              --solver $<TARGET_FILE:pbmc-bin>
+    )
+    add_test(
+      NAME gate_4c_rsr
+      COMMAND ${PYTHON_EXECUTABLE}
+              ${CMAKE_CURRENT_SOURCE_DIR}/tests/inprocessing/run_gate_4c.py
+              --solver $<TARGET_FILE:pbmc-bin>
+    )
+    add_test(
+      NAME gate_4d_rup
+      COMMAND ${PYTHON_EXECUTABLE}
+              ${CMAKE_CURRENT_SOURCE_DIR}/tests/inprocessing/run_gate_4d.py
+              --solver $<TARGET_FILE:pbmc-bin>
+    )
+    if(PBMC_USE_GLPK)
+      add_test(
+        NAME gate_5_lp1_sblp
+        COMMAND ${PYTHON_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/inprocessing/run_gate_5_lp1.py
+                --solver $<TARGET_FILE:pbmc-bin>
+      )
+    endif()
   endif()
 endif()

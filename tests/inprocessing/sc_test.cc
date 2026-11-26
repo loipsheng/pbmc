@@ -161,6 +161,11 @@ GPMC::Configuration scConfig(
 	config.cntr.ablation.insert(GPMC::SimpRule::CS);
 	config.cntr.ablation.insert(GPMC::SimpRule::GCD);
 	config.cntr.ablation.insert(GPMC::SimpRule::CARD);
+	config.cntr.ablation.insert(GPMC::SimpRule::RIR);
+	config.cntr.ablation.insert(GPMC::SimpRule::RPR);
+	config.cntr.ablation.insert(GPMC::SimpRule::RSR);
+	config.cntr.ablation.insert(GPMC::SimpRule::RUP);
+	config.cntr.ablation.insert(GPMC::SimpRule::SBLP);
 	return config;
 }
 

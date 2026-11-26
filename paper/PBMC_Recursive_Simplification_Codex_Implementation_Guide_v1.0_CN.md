@@ -420,14 +420,14 @@ C2: y+z>=1
 
 **验收**：满足约束不再连接分量、回跳后恢复；BasicCheck 和 RIR 不重复计算收益或因子。
 
-### 7.2 关卡 4B：ParallelRowRule（RPR；独立 `.h/.cc`）
+### 7.2 关卡 4B：ParallelRowRule（RPR；统一实现在 `simplify.h/.cc`）
 
 - 将 canonical 后的相同 LHS（相同 literal/系数，不仅 support 相同）约束分组，保留最大 RHS 的 `>=` 约束，删除较弱行。正比例缩放要经过精确整数归一化。
 - `same LHS`, `different RHS` 简单例：`2x+2y>=2` 与 `x+y>=1` 规范化后重复；`x+y>=2` 蕴含 `x+y>=1`，应保留前者。
 - 对互补方向，不得把不一致等式当作普通平行冗余删除；检查约束方向和 canonical literal polarity。
 - hash 只筛选 bucket；**完整行内容+degree 精确比较**后才能删除。任何写入 overlay 的删除要通过“当前其余保留公式蕴含目标行”验证。
 
-**验收**：行重排/哈希碰撞/取反文字/多 RHS/等式展开测试；无 false delete；删除桥接行使分量数增加时 exact count 一致。
+**验收**：行重排/哈希碰撞/取反文字/多 RHS/等式展开测试；无 false delete；活动行数、residual cache identity 与回跳恢复正确。RPR 的正比例行具有相同 literal support，保留行仍连接相同变量，因此 **RPR 本身不应被要求增加分量数**；删除不同 support 的桥接冗余行并产生新分量属于下一关 RSR 的验收范围。
 
 ### 7.3 关卡 4C：SubsetRowRule（Generalized RSR；独立 `.h/.cc`）
 
@@ -443,7 +443,7 @@ $$
 - 在某当前公式中按顺序删除时每次证明基于“尚保留的其余约束”；禁止两条互相蕴含的行在同一批次都因对方存在而被删。
 - 不把“RSR 调用成功”自动等同于新增 decomposition；实际测新连通分量的变化。
 
-**验收**：精确 entailment oracle、反向极性、不同 RHS、哈希桶/候选索引、重算失效、undo、四模式、缓存 Bypass。
+**验收**：精确 entailment oracle、反向极性、不同 RHS、固定候选对/文字预算、提交前重算、undo、四模式、缓存 Bypass。不同 support 的一般蕴含不能用“同 LHS hash”作必要过滤条件；后续若增加候选索引，必须以完整全对扫描作正确性 oracle。
 
 ### 7.4 关卡 4D：RupRedundancyRule（独立 `.h/.cc`）
 

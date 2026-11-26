@@ -89,8 +89,8 @@ def check_case(
     require_commit: bool = False,
 ) -> None:
     expected = count_models(instance)
-    empty = run(solver, instance, cache, "1:2:3:4:5:6")
-    card = run(solver, instance, cache, "1:2:3:4:5")
+    empty = run(solver, instance, cache, "1:2:3:4:5:6:7:8:9:10:11")
+    card = run(solver, instance, cache, "1:2:3:4:5:7:8:9:10:11")
     values = (count(empty, "empty"), count(card, "Cardinality"))
     if values != (expected, expected):
         raise AssertionError(f"{instance.name}: counts={values}, oracle={expected}")
@@ -101,11 +101,11 @@ def check_case(
             f"{instance.name}: legacy view-only cardinality changed the search"
         )
     if (
-        "c o simplification ablation = Basic, BICP, CS, GCD, Cardinality, SC"
+        "c o simplification ablation = Basic, BICP, CS, GCD, Cardinality, SC, RIR, RPR, RSR, RUP, SB-LP"
         not in empty.stdout
     ):
         raise AssertionError("empty simplifier ablation was not reported")
-    if "c o simplification ablation = Basic, BICP, CS, GCD, SC" not in card.stdout:
+    if "c o simplification ablation = Basic, BICP, CS, GCD, SC, RIR, RPR, RSR, RUP, SB-LP" not in card.stdout:
         raise AssertionError("Cardinality-only ablation was not reported")
     if stat(empty.stdout, "Cardinality calls", "empty") != 0:
         raise AssertionError("ablated Cardinality was called")

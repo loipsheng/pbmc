@@ -1570,6 +1570,16 @@ void PBcounter<T_data>::printStats() const
 					ablation += ablation.empty() ? "Cardinality" : ", Cardinality";
 				if(config.disabled(SimpRule::SC))
 					ablation += ablation.empty() ? "SC" : ", SC";
+				if(config.disabled(SimpRule::RIR))
+					ablation += ablation.empty() ? "RIR" : ", RIR";
+				if(config.disabled(SimpRule::RPR))
+					ablation += ablation.empty() ? "RPR" : ", RPR";
+				if(config.disabled(SimpRule::RSR))
+					ablation += ablation.empty() ? "RSR" : ", RSR";
+				if(config.disabled(SimpRule::RUP))
+					ablation += ablation.empty() ? "RUP" : ", RUP";
+				if(config.disabled(SimpRule::SBLP))
+					ablation += ablation.empty() ? "SB-LP" : ", SB-LP";
 				printf("c o simplification ablation = %s\n",
 						ablation.empty() ? "none (all enabled)" : ablation.c_str());
 				printf("c o simplification calls    = %-11"PRIu64"\n", simp_stats.calls);
@@ -1577,6 +1587,11 @@ void PBcounter<T_data>::printStats() const
 				printf("c o simplification conflict = %-11"PRIu64"\n", simp_stats.conflicts);
 				printf("c o simplification budget   = %-11"PRIu64"\n", simp_stats.budgets);
 				printf("c o simplification time     = %.6f s\n", simp_stats.seconds);
+#ifdef PBMC_USE_GLPK
+				printf("c o SB-LP backend           = GLPK\n");
+#else
+				printf("c o SB-LP backend           = disabled at build time\n");
+#endif
 				printf("c o Basic calls             = %-11"PRIu64"\n", simp_stats.basic_calls);
 				printf("c o Basic rows              = %-11"PRIu64"\n", simp_stats.basic_rows);
 				printf("c o Basic open              = %-11"PRIu64"\n", simp_stats.basic_open);
@@ -1592,6 +1607,20 @@ void PBcounter<T_data>::printStats() const
 				printf("c o BICP unsat              = %-11"PRIu64"\n", simp_stats.bicp_unsat);
 				printf("c o BICP implied            = %-11"PRIu64"\n", simp_stats.bicp_implied);
 				printf("c o BICP work               = %-11"PRIu64"\n", simp_stats.bicp_work);
+				printf("c o SB-LP calls             = %-11"PRIu64"\n", simp_stats.sblp_calls);
+				printf("c o SB-LP rows              = %-11"PRIu64"\n", simp_stats.sblp_rows);
+				printf("c o SB-LP variables         = %-11"PRIu64"\n", simp_stats.sblp_variables);
+				printf("c o SB-LP MIP calls         = %-11"PRIu64"\n", simp_stats.sblp_mip_calls);
+				printf("c o SB-LP candidates        = %-11"PRIu64"\n", simp_stats.sblp_candidates);
+				printf("c o SB-LP exact checks      = %-11"PRIu64"\n", simp_stats.sblp_exact_checks);
+				printf("c o SB-LP exact passed      = %-11"PRIu64"\n", simp_stats.sblp_exact_passed);
+				printf("c o SB-LP exact rejected    = %-11"PRIu64"\n", simp_stats.sblp_exact_rejected);
+				printf("c o SB-LP numeric rejected  = %-11"PRIu64"\n", simp_stats.sblp_numeric_rejected);
+				printf("c o SB-LP unknown           = %-11"PRIu64"\n", simp_stats.sblp_unknown);
+				printf("c o SB-LP implied           = %-11"PRIu64"\n", simp_stats.sblp_implied);
+				printf("c o SB-LP work              = %-11"PRIu64"\n", simp_stats.sblp_work);
+				printf("c o SB-LP budgets           = %-11"PRIu64"\n", simp_stats.sblp_budgets);
+				printf("c o SB-LP time              = %.6f s\n", simp_stats.sblp_seconds);
 				printf("c o CS calls                = %-11"PRIu64"\n", simp_stats.cs_calls);
 				printf("c o CS rows                 = %-11"PRIu64"\n", simp_stats.cs_rows);
 				printf("c o CS equality rows        = %-11"PRIu64"\n", simp_stats.cs_equality_rows);
@@ -1619,6 +1648,42 @@ void PBcounter<T_data>::printStats() const
 				printf("c o SC commits              = %-11"PRIu64"\n", simp_stats.sc_commits);
 				printf("c o SC work                 = %-11"PRIu64"\n", simp_stats.sc_work);
 				printf("c o SC budgets              = %-11"PRIu64"\n", simp_stats.sc_budgets);
+				printf("c o RIR calls               = %-11"PRIu64"\n", simp_stats.rir_calls);
+				printf("c o RIR rows                = %-11"PRIu64"\n", simp_stats.rir_rows);
+				printf("c o RIR equality rows       = %-11"PRIu64"\n", simp_stats.rir_equality_rows);
+				printf("c o RIR proposals           = %-11"PRIu64"\n", simp_stats.rir_proposals);
+				printf("c o RIR removed rows        = %-11"PRIu64"\n", simp_stats.rir_removed_rows);
+				printf("c o RIR commits             = %-11"PRIu64"\n", simp_stats.rir_commits);
+				printf("c o RPR calls               = %-11"PRIu64"\n", simp_stats.rpr_calls);
+				printf("c o RPR rows                = %-11"PRIu64"\n", simp_stats.rpr_rows);
+				printf("c o RPR equality rows       = %-11"PRIu64"\n", simp_stats.rpr_equality_rows);
+				printf("c o RPR pairs               = %-11"PRIu64"\n", simp_stats.rpr_pairs);
+				printf("c o RPR proposals           = %-11"PRIu64"\n", simp_stats.rpr_proposals);
+				printf("c o RPR revalidations       = %-11"PRIu64"\n", simp_stats.rpr_revalidations);
+				printf("c o RPR removed rows        = %-11"PRIu64"\n", simp_stats.rpr_removed_rows);
+				printf("c o RPR commits             = %-11"PRIu64"\n", simp_stats.rpr_commits);
+				printf("c o RSR calls               = %-11"PRIu64"\n", simp_stats.rsr_calls);
+				printf("c o RSR rows                = %-11"PRIu64"\n", simp_stats.rsr_rows);
+				printf("c o RSR equality rows       = %-11"PRIu64"\n", simp_stats.rsr_equality_rows);
+				printf("c o RSR pairs               = %-11"PRIu64"\n", simp_stats.rsr_pairs);
+				printf("c o RSR checks              = %-11"PRIu64"\n", simp_stats.rsr_checks);
+				printf("c o RSR proposals           = %-11"PRIu64"\n", simp_stats.rsr_proposals);
+				printf("c o RSR revalidations       = %-11"PRIu64"\n", simp_stats.rsr_revalidations);
+				printf("c o RSR removed rows        = %-11"PRIu64"\n", simp_stats.rsr_removed_rows);
+				printf("c o RSR commits             = %-11"PRIu64"\n", simp_stats.rsr_commits);
+				printf("c o RSR work                = %-11"PRIu64"\n", simp_stats.rsr_work);
+				printf("c o RSR budgets             = %-11"PRIu64"\n", simp_stats.rsr_budgets);
+				printf("c o RUP calls               = %-11"PRIu64"\n", simp_stats.rup_calls);
+				printf("c o RUP rows                = %-11"PRIu64"\n", simp_stats.rup_rows);
+				printf("c o RUP equality rows       = %-11"PRIu64"\n", simp_stats.rup_equality_rows);
+				printf("c o RUP targets             = %-11"PRIu64"\n", simp_stats.rup_targets);
+				printf("c o RUP checks              = %-11"PRIu64"\n", simp_stats.rup_checks);
+				printf("c o RUP proofs              = %-11"PRIu64"\n", simp_stats.rup_proofs);
+				printf("c o RUP revalidations       = %-11"PRIu64"\n", simp_stats.rup_revalidations);
+				printf("c o RUP removed rows        = %-11"PRIu64"\n", simp_stats.rup_removed_rows);
+				printf("c o RUP commits             = %-11"PRIu64"\n", simp_stats.rup_commits);
+				printf("c o RUP work                = %-11"PRIu64"\n", simp_stats.rup_work);
+				printf("c o RUP budgets             = %-11"PRIu64"\n", simp_stats.rup_budgets);
 				printf("c o Overlay rows            = %zu\n", simp_rows_.size());
 				printf("c o Overlay undo depth      = %zu\n", simp_rows_.undoSize());
 				printf("c o Overlay changes         = %-11"PRIu64"\n", simp_rows_.changes());

@@ -56,6 +56,8 @@ def stat(output: str, name: str, label: str) -> int:
 
 
 def check_case(solver: Path, instance: Path, *options: str) -> None:
+    if not any(option.startswith("-ablation=") for option in options):
+        options = ("-ablation=3:4:5:6", *options)
     expected = count_models(instance)
     results = {
         mode: run(solver, instance, mode, *options)
@@ -67,6 +69,18 @@ def check_case(solver: Path, instance: Path, *options: str) -> None:
     for mode, result in results.items():
         if f"c o Cache mode            = {mode}" not in result.stdout:
             raise AssertionError(f"{mode}: cache mode was not reported")
+        for name in (
+            "Overlay rows",
+            "Overlay undo depth",
+            "Overlay changes",
+            "Overlay undos",
+        ):
+            if stat(result.stdout, name, mode) != 0:
+                raise AssertionError(f"{mode}: empty overlay changed state")
+        if stat(result.stdout, "Overlay next revision", mode) != 1:
+            raise AssertionError(f"{mode}: empty overlay consumed a revision")
+        if stat(result.stdout, "Overlay next transaction", mode) != 1:
+            raise AssertionError(f"{mode}: empty overlay consumed a transaction")
     residual = results["residual"].stdout
     for name in (
         "Cache lookup",
@@ -124,14 +138,14 @@ def main() -> int:
     check_case(
         solver,
         cases / "backjump_without_lit.opb",
-        "-ablation=1:2",
+        "-ablation=1:2:3:4:5:6",
         "-vs=0",
         "-bjthd=0.99",
     )
     check_case(
         solver,
         cases / "backjump_without_lit.opb",
-        "-ablation=1:2",
+        "-ablation=1:2:3:4:5:6",
         "-vs=0",
         "-no-bj",
     )
@@ -154,7 +168,8 @@ def main() -> int:
         raise AssertionError("could not generate enough random exact-MC cases")
 
     two_components = run(
-        solver, cases / "two_components.opb", "residual", "-cs=1", "-vs=0"
+        solver, cases / "two_components.opb", "residual", "-cs=1",
+        "-ablation=3:4:5:6", "-vs=0"
     )
     if stat(two_components.stdout, "Cache insert", "two-components") == 0:
         raise AssertionError("residual cache did not store a component")

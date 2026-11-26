@@ -170,6 +170,13 @@ uint64_t RowTemplatePool::sizeInBytes() const {
 	return bytes;
 }
 
+uint64_t RowTemplatePool::references() const {
+	uint64_t result = 0;
+	for (const Entry& entry : entries_)
+		if (entry.alive) result += entry.references;
+	return result;
+}
+
 template <typename T_data>
 unsigned PackedComponent<T_data>::_bits_per_clause = 0;
 template <typename T_data>
@@ -493,6 +500,9 @@ bool ComponentCache<T_data>::requestValueOf(Component &comp, T_data &rn, NodeInd
 	num_cache_look_ups_++;
 
 	if (residual()) {
+		if (!packedcomp.hasPendingKey() || packedcomp.hasCompactKey() ||
+				!packedcomp.templateRefs().empty())
+			throw logic_error("residual cache lookup lost its entry snapshot");
 		CompactComponentKey key;
 		vector<RowTemplateID> references;
 		if (!compactKey(packedcomp.pendingKey(), false, key, references)) return false;

@@ -78,9 +78,9 @@ def check_case(
     expected = count_models(instance)
     off = run(solver, instance, "-mode=0", "-no-inprocess", "-vs=0")
     empty = run(
-        solver, instance, "-mode=0", "-inprocess", "-ablation=1:2", "-vs=0"
+        solver, instance, "-mode=0", "-inprocess", "-ablation=1:2:3:4:5:6", "-vs=0"
     )
-    bicp = run(solver, instance, "-mode=0", "-inprocess", "-ablation=1", "-vs=0")
+    bicp = run(solver, instance, "-mode=0", "-inprocess", "-ablation=1:3:4:5", "-vs=0")
     values = (count(off, "off"), count(empty, "empty"), count(bicp, "BICP"))
     if any(value != expected for value in values):
         raise AssertionError(f"{instance.name}: counts={values}, oracle={expected}")

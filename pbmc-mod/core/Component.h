@@ -28,6 +28,8 @@ using namespace std;
 
 namespace GPMC {
 
+class SimpRows;
+
 typedef int ClID;
 #define clid_Undef (-1)
 
@@ -66,6 +68,7 @@ struct ResidualRecordKey {
 struct PendingComponentKey {
 	vector<uint8_t> variables;
 	vector<ResidualRecordKey> records;
+	bool empty() const { return variables.empty() && records.empty(); }
 
 	uint64_t sizeInBytes() const {
 		uint64_t bytes = variables.capacity();
@@ -117,6 +120,7 @@ public:
 	uint64_t reuses() const { return reuses_; }
 	uint64_t wakes() const { return wakes_; }
 	uint64_t reclaimed() const { return reclaimed_; }
+	uint64_t references() const;
 };
 
 typedef unsigned CacheEntryID;
@@ -521,11 +525,23 @@ public:
 		return first_descendant_;
 	}
 
-	void setPendingKey(PendingComponentKey key) { pending_key_ = std::move(key); }
-	PendingComponentKey& pendingKey() { return pending_key_; }
+	void setPendingKey(PendingComponentKey key) {
+		if (key.empty() || !pending_key_.empty() || hasCompactKey())
+			throw logic_error("residual cache entry key is not a fresh snapshot");
+		pending_key_ = std::move(key);
+	}
 	const PendingComponentKey& pendingKey() const { return pending_key_; }
-	void clearPendingKey() { pending_key_ = PendingComponentKey(); }
-	void setCompactKey(CompactComponentKey key) { compact_key_ = std::move(key); }
+	bool hasPendingKey() const { return !pending_key_.empty(); }
+	void clearPendingKey() {
+		if (!hasPendingKey() || !hasCompactKey())
+			throw logic_error("invalid residual cache snapshot transition");
+		pending_key_ = PendingComponentKey();
+	}
+	void setCompactKey(CompactComponentKey key) {
+		if (!hasPendingKey() || hasCompactKey() || key.bytes.empty())
+			throw logic_error("residual cache snapshot was already finalized");
+		compact_key_ = std::move(key);
+	}
 	const CompactComponentKey& compactKey() const { return compact_key_; }
 	bool hasCompactKey() const { return !compact_key_.bytes.empty(); }
 	vector<RowTemplateID>& templateRefs() { return template_refs_; }
@@ -640,6 +656,7 @@ public:
 		printf("c o Template wake         = %"PRIu64"\n", templates_.wakes());
 		printf("c o Template reclaim      = %"PRIu64"\n", templates_.reclaimed());
 	}
+	uint64_t templateReferences() const { return templates_.references(); }
 	// --- Added by k-hasimt --- END
 
 private:
@@ -727,6 +744,7 @@ class ComponentManager {
 	vector<rs::CRef> constraints_;
 	unordered_map<RowVersionID, ComponentBind> row_binds_;
 	vector<ComponentBind> clid_binds_;
+	const SimpRows* simp_rows_ = nullptr;
 	// vector<int> slacks_;
 	vec<unsigned> bits_of_weights_;
 	vector<int> gaps_;
@@ -752,7 +770,8 @@ public:
 
 	// overloading for pb
 	void init(int nvars, int npvars, const vector<rs::CRef>& sconstraints,
-			const rs::ConstraintAllocator& sca, const vector<RowInfo>& rows);
+			const rs::ConstraintAllocator& sca, const vector<RowInfo>& rows,
+			const SimpRows* simp_rows = nullptr);
 	bool hasRowBind(RowVersionID version) const;
 	const ComponentBind& rowBind(RowVersionID version) const;
 	bool validRowBind(RowVersionID version, uint64_t solver_id) const;
@@ -900,6 +919,8 @@ protected:
 
 	void searchComponent(Var seed_var, const vec<lbool>& assigns,
 			int& nvar_in_comp, int& ncls_in_comp);
+	bool effectiveRow(ClID clid,
+			vector<pair<rs::Lit, rs::BigCoef>>& terms, rs::BigVal& degree) const;
 };
 
 template <class T_data>
@@ -1281,6 +1302,9 @@ void ComponentCache<T_data>::storeValueOf(CacheEntryID id, const T_data &model_c
 			cleanPollutionsInvolving(entry(id).first_descendant());
 		return;
 	}
+	if (residual() && (!entry(id).hasPendingKey() ||
+			entry(id).hasCompactKey() || !entry(id).templateRefs().empty()))
+		throw logic_error("residual cache entry snapshot was already stored");
 	// when storing the new model count the size of the model count
 	// and hence that of the component will change
 	cache_bytes_memory_usage_ -= entry(id).SizeInBytes();

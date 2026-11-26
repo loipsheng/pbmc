@@ -173,8 +173,12 @@ SimpResult PBcounter<T_data>::simplifyNode()
 	const double start = cpuTime();
 #ifndef NDEBUG
 	validateRows(true);
+	simp_rows_.validate(decisionLevel());
 #endif
 	const SimpResult result = Simplifier<T_data>::run(*this);
+#ifndef NDEBUG
+	simp_rows_.validate(decisionLevel());
+#endif
 	simp_stats.seconds += cpuTime() - start;
 
 	switch(result.status) {
@@ -666,8 +670,9 @@ void PBcounter<T_data>::count_main()
 
 	btStateT bstate = RESOLVED;
 	limlevel = 0;
+	simp_rows_.clear();
 	validateRows(false);
-	cmpmgr.init(nVars(), nPVars(), this->constraints, this->ca, rows_);
+	cmpmgr.init(nVars(), nPVars(), this->constraints, this->ca, rows_, &simp_rows_);
 	validateRows(true);
 
 	for(;;) {
@@ -731,12 +736,14 @@ void PBcounter<T_data>::count_main()
 			// NO CONFLICT
 			if(config.inprocess) {
 				const SimpResult result = simplifyNode();
-				if(result.status == SimpStatus::IMPLIED)
+				if(result.status == SimpStatus::IMPLIED ||
+						result.status == SimpStatus::ROW_CHANGED ||
+						result.status == SimpStatus::ROW_REMOVED)
 					continue;
 				if(result.status != SimpStatus::UNCHANGED &&
 						result.status != SimpStatus::BUDGET)
 					throw std::logic_error(
-							"read-only simplification changed search state");
+							"simplification returned an unhandled search state");
 			}
 			assert(!cmpmgr.topDecision().hasUnprocessedSplitComp());
 
@@ -1555,6 +1562,14 @@ void PBcounter<T_data>::printStats() const
 				if(config.disabled(SimpRule::BASIC)) ablation = "Basic";
 				if(config.disabled(SimpRule::BICP))
 					ablation += ablation.empty() ? "BICP" : ", BICP";
+				if(config.disabled(SimpRule::CS))
+					ablation += ablation.empty() ? "CS" : ", CS";
+				if(config.disabled(SimpRule::GCD))
+					ablation += ablation.empty() ? "GCD" : ", GCD";
+				if(config.disabled(SimpRule::CARD))
+					ablation += ablation.empty() ? "Cardinality" : ", Cardinality";
+				if(config.disabled(SimpRule::SC))
+					ablation += ablation.empty() ? "SC" : ", SC";
 				printf("c o simplification ablation = %s\n",
 						ablation.empty() ? "none (all enabled)" : ablation.c_str());
 				printf("c o simplification calls    = %-11"PRIu64"\n", simp_stats.calls);
@@ -1577,6 +1592,39 @@ void PBcounter<T_data>::printStats() const
 				printf("c o BICP unsat              = %-11"PRIu64"\n", simp_stats.bicp_unsat);
 				printf("c o BICP implied            = %-11"PRIu64"\n", simp_stats.bicp_implied);
 				printf("c o BICP work               = %-11"PRIu64"\n", simp_stats.bicp_work);
+				printf("c o CS calls                = %-11"PRIu64"\n", simp_stats.cs_calls);
+				printf("c o CS rows                 = %-11"PRIu64"\n", simp_stats.cs_rows);
+				printf("c o CS equality rows        = %-11"PRIu64"\n", simp_stats.cs_equality_rows);
+				printf("c o CS changed rows         = %-11"PRIu64"\n", simp_stats.cs_changed_rows);
+				printf("c o CS coefficients         = %-11"PRIu64"\n", simp_stats.cs_coefficients);
+				printf("c o CS commits              = %-11"PRIu64"\n", simp_stats.cs_commits);
+				printf("c o GCD calls               = %-11"PRIu64"\n", simp_stats.gcd_calls);
+				printf("c o GCD rows                = %-11"PRIu64"\n", simp_stats.gcd_rows);
+				printf("c o GCD equality rows       = %-11"PRIu64"\n", simp_stats.gcd_equality_rows);
+				printf("c o GCD changed rows        = %-11"PRIu64"\n", simp_stats.gcd_changed_rows);
+				printf("c o GCD commits             = %-11"PRIu64"\n", simp_stats.gcd_commits);
+				printf("c o Cardinality calls       = %-11"PRIu64"\n", simp_stats.card_calls);
+				printf("c o Cardinality rows        = %-11"PRIu64"\n", simp_stats.card_rows);
+				printf("c o Cardinality equality rows = %-11"PRIu64"\n", simp_stats.card_equality_rows);
+				printf("c o Cardinality changed rows = %-11"PRIu64"\n", simp_stats.card_changed_rows);
+				printf("c o Cardinality commits     = %-11"PRIu64"\n", simp_stats.card_commits);
+				printf("c o SC calls                = %-11"PRIu64"\n", simp_stats.sc_calls);
+				printf("c o SC rows                 = %-11"PRIu64"\n", simp_stats.sc_rows);
+				printf("c o SC pairs                = %-11"PRIu64"\n", simp_stats.sc_pairs);
+				printf("c o SC lambdas              = %-11"PRIu64"\n", simp_stats.sc_lambdas);
+				printf("c o SC proposals            = %-11"PRIu64"\n", simp_stats.sc_proposals);
+				printf("c o SC coefficients         = %-11"PRIu64"\n", simp_stats.sc_coefficients);
+				printf("c o SC revalidations        = %-11"PRIu64"\n", simp_stats.sc_revalidations);
+				printf("c o SC changed rows         = %-11"PRIu64"\n", simp_stats.sc_changed_rows);
+				printf("c o SC commits              = %-11"PRIu64"\n", simp_stats.sc_commits);
+				printf("c o SC work                 = %-11"PRIu64"\n", simp_stats.sc_work);
+				printf("c o SC budgets              = %-11"PRIu64"\n", simp_stats.sc_budgets);
+				printf("c o Overlay rows            = %zu\n", simp_rows_.size());
+				printf("c o Overlay undo depth      = %zu\n", simp_rows_.undoSize());
+				printf("c o Overlay changes         = %-11"PRIu64"\n", simp_rows_.changes());
+				printf("c o Overlay undos           = %-11"PRIu64"\n", simp_rows_.undos());
+				printf("c o Overlay next revision   = %-11"PRIu64"\n", simp_rows_.nextRevision());
+				printf("c o Overlay next transaction = %-11"PRIu64"\n", simp_rows_.nextTransaction());
 			}
 			printf("c o conflicts             = %-11"PRIu64" (count %"PRIu64", sat %"PRIu64")\n", conflicts, conflicts-conflicts_sg, conflicts_sg);
 			printf("c o decisions             = %-11"PRIu64" (count %"PRIu64", sat %"PRIu64")\n", decisions, decisions-decisions_sg, decisions_sg);

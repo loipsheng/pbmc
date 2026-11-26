@@ -94,10 +94,10 @@ def main() -> int:
         instance = cases / filename
         off = run_solver(solver, instance, "-mode=0", "-no-inprocess", "-vs=0")
         ablated = run_solver(
-            solver, instance, "-mode=0", "-inprocess", "-ablation=1:2", "-vs=0"
+            solver, instance, "-mode=0", "-inprocess", "-ablation=1:2:3:4:5:6", "-vs=0"
         )
         enabled = run_solver(
-            solver, instance, "-mode=0", "-inprocess", "-ablation=2", "-vs=0"
+            solver, instance, "-mode=0", "-inprocess", "-ablation=2:3:4:5", "-vs=0"
         )
         expected = count_models(instance)
         counts = (
@@ -114,7 +114,7 @@ def main() -> int:
         if stable_stats(enabled.stdout, f"{filename} enabled") != baseline:
             raise AssertionError(f"{filename}: read-only Basic changed search statistics")
 
-        if "c o simplification ablation = Basic, BICP" not in ablated.stdout:
+        if "c o simplification ablation = Basic, BICP, CS, GCD, Cardinality, SC" not in ablated.stdout:
             raise AssertionError(f"{filename}: empty framework ablation was not reported")
         if stat(ablated.stdout, "Basic calls", f"{filename} ablated") != 0:
             raise AssertionError(f"{filename}: ablated Basic was called")
@@ -135,7 +135,7 @@ def main() -> int:
         "ablation without framework",
     )
     for value, message in (
-        ("3", "unknown -ablation rule ID"),
+        ("7", "unknown -ablation rule ID"),
         ("x", "invalid -ablation rule ID"),
         ("1:", "empty rule ID"),
         (":1", "empty rule ID"),

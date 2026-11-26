@@ -112,6 +112,10 @@ int main() {
 		GPMC::Configuration config;
 		config.cntr.inprocess = true;
 		config.cntr.ablation.insert(GPMC::SimpRule::BICP);
+		config.cntr.ablation.insert(GPMC::SimpRule::CS);
+		config.cntr.ablation.insert(GPMC::SimpRule::GCD);
+		config.cntr.ablation.insert(GPMC::SimpRule::CARD);
+		config.cntr.ablation.insert(GPMC::SimpRule::SC);
 		TestCounter counter(config);
 		counter.init();
 		if (!counter.prepare(kPropagationFormula, true) || !counter.nativeReasonAndGC())
@@ -121,6 +125,10 @@ int main() {
 		GPMC::Configuration config;
 		config.cntr.inprocess = true;
 		config.cntr.ablation.insert(GPMC::SimpRule::BICP);
+		config.cntr.ablation.insert(GPMC::SimpRule::CS);
+		config.cntr.ablation.insert(GPMC::SimpRule::GCD);
+		config.cntr.ablation.insert(GPMC::SimpRule::CARD);
+		config.cntr.ablation.insert(GPMC::SimpRule::SC);
 		TestCounter counter(config);
 		counter.init();
 		if (!counter.prepare(kPropagationFormula) || !counter.detectsMissedPropagation())
@@ -131,6 +139,10 @@ int main() {
 		config.cntr.inprocess = true;
 		config.cntr.ablation.insert(GPMC::SimpRule::BASIC);
 		config.cntr.ablation.insert(GPMC::SimpRule::BICP);
+		config.cntr.ablation.insert(GPMC::SimpRule::CS);
+		config.cntr.ablation.insert(GPMC::SimpRule::GCD);
+		config.cntr.ablation.insert(GPMC::SimpRule::CARD);
+		config.cntr.ablation.insert(GPMC::SimpRule::SC);
 		TestCounter counter(config);
 		counter.init();
 		if (!counter.prepare(kPropagationFormula) || !counter.ablationSkipsBasic())
@@ -140,6 +152,10 @@ int main() {
 		GPMC::Configuration config;
 		config.cntr.inprocess = true;
 		config.cntr.ablation.insert(GPMC::SimpRule::BICP);
+		config.cntr.ablation.insert(GPMC::SimpRule::CS);
+		config.cntr.ablation.insert(GPMC::SimpRule::GCD);
+		config.cntr.ablation.insert(GPMC::SimpRule::CARD);
+		config.cntr.ablation.insert(GPMC::SimpRule::SC);
 		TestCounter counter(config);
 		counter.init();
 		if (!counter.prepare(kCleanupFormula) || !counter.keepsFormulaDuringCleanup())

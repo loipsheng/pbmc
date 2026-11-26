@@ -84,6 +84,36 @@ if(BUILD_TESTING)
   )
   add_test(NAME gate_2e1_reference_key COMMAND reference-key-test)
 
+  add_executable(cs-test tests/inprocessing/cs_test.cc)
+  target_link_libraries(cs-test
+    pbmc roundingsat flowcutter z mpfr gmp gmpxx
+  )
+  add_test(NAME gate_3a_cs_unit COMMAND cs-test)
+
+  add_executable(gcd-test tests/inprocessing/gcd_test.cc)
+  target_link_libraries(gcd-test
+    pbmc roundingsat flowcutter z mpfr gmp gmpxx
+  )
+  add_test(NAME gate_3b_gcd_unit COMMAND gcd-test)
+
+  add_executable(cardinality-test tests/inprocessing/cardinality_test.cc)
+  target_link_libraries(cardinality-test
+    pbmc roundingsat flowcutter z mpfr gmp gmpxx
+  )
+  add_test(NAME gate_3c_cardinality_unit COMMAND cardinality-test)
+
+  add_executable(sc-test tests/inprocessing/sc_test.cc)
+  target_link_libraries(sc-test
+    pbmc roundingsat flowcutter z mpfr gmp gmpxx
+  )
+  add_test(NAME gate_3d_sc_committed_unit COMMAND sc-test)
+
+  add_executable(overlay-test tests/inprocessing/overlay_test.cc)
+  target_link_libraries(overlay-test
+    pbmc roundingsat flowcutter z mpfr gmp gmpxx
+  )
+  add_test(NAME gate_3e_overlay_undo COMMAND overlay-test)
+
   find_package(PythonInterp 3 QUIET)
   if(PYTHONINTERP_FOUND)
     add_test(
@@ -126,6 +156,30 @@ if(BUILD_TESTING)
       NAME gate_2e_residual_cache
       COMMAND ${PYTHON_EXECUTABLE}
               ${CMAKE_CURRENT_SOURCE_DIR}/tests/inprocessing/run_gate_2e.py
+              --solver $<TARGET_FILE:pbmc-bin>
+    )
+    add_test(
+      NAME gate_3a_cs
+      COMMAND ${PYTHON_EXECUTABLE}
+              ${CMAKE_CURRENT_SOURCE_DIR}/tests/inprocessing/run_gate_3a.py
+              --solver $<TARGET_FILE:pbmc-bin>
+    )
+    add_test(
+      NAME gate_3b_gcd
+      COMMAND ${PYTHON_EXECUTABLE}
+              ${CMAKE_CURRENT_SOURCE_DIR}/tests/inprocessing/run_gate_3b.py
+              --solver $<TARGET_FILE:pbmc-bin>
+    )
+    add_test(
+      NAME gate_3c_cardinality
+      COMMAND ${PYTHON_EXECUTABLE}
+              ${CMAKE_CURRENT_SOURCE_DIR}/tests/inprocessing/run_gate_3c.py
+              --solver $<TARGET_FILE:pbmc-bin>
+    )
+    add_test(
+      NAME gate_3d_sc_committed
+      COMMAND ${PYTHON_EXECUTABLE}
+              ${CMAKE_CURRENT_SOURCE_DIR}/tests/inprocessing/run_gate_3d.py
               --solver $<TARGET_FILE:pbmc-bin>
     )
   endif()

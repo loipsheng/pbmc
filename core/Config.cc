@@ -22,7 +22,7 @@ static IntOption		opt_cachesize	(omain, "cs", "Maximum component cache size (MB)
 static BoolOption		opt_bj			(omain, "bj", "Backjumping", true);
 static DoubleOption	opt_bj_thd		(omain, "bjthd", "Backjumping threshold", 0.5, DoubleRange(0, false, 1, false));
 static BoolOption		opt_inprocess	(omain, "inprocess", "Enable recursive PB simplification (exact MC only)", false);
-static StringOption	opt_ablation	(omain, "ablation", "Disabled simplification IDs separated by ':' (1=Basic, 2=BICP)", "");
+static StringOption	opt_ablation	(omain, "ablation", "Disabled simplification IDs separated by ':' (1=Basic, 2=BICP, 3=CS, 4=SC, 5=GCD, 6=Cardinality)", "");
 static StringOption	opt_simpcache	(omain, "simp-cache", "Component cache used by recursive simplification (legacy, bypass, or residual)", "legacy");
 static DoubleOption	opt_coef		(omain, "coef", "TDscore coefficient", 100, DoubleRange(0, true, 10000000, true));
 static BoolOption		opt_natw		(omain, "natw", "Natural number weight. If off, real number weight ([0, 1])", false);
@@ -99,6 +99,18 @@ static std::unordered_set<SimpRule> parseAblation(const char* value) {
 			break;
 		case static_cast<int>(SimpRule::BICP):
 			result.insert(SimpRule::BICP);
+			break;
+		case static_cast<int>(SimpRule::CS):
+			result.insert(SimpRule::CS);
+			break;
+		case static_cast<int>(SimpRule::SC):
+			result.insert(SimpRule::SC);
+			break;
+		case static_cast<int>(SimpRule::GCD):
+			result.insert(SimpRule::GCD);
+			break;
+		case static_cast<int>(SimpRule::CARD):
+			result.insert(SimpRule::CARD);
 			break;
 		default:
 			throw std::invalid_argument("unknown -ablation rule ID: " + token);

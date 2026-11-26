@@ -1,30 +1,32 @@
-# PBMC 递归简化模块：Codex 分阶段编码、验收与缓存迁移实施指南（v1.1）
+# PBMC 递归简化模块：Codex 分阶段编码、验收与缓存迁移实施指南（v1.1，持续更新）
 
-> **用途**：本文件是源码审计后的可执行开发计划。Prompt 0、0B、0E 与 Gate 1 已完成，审计报告见 `docs/inprocessing/00_code_audit.md`，最近验收见 `docs/inprocessing/acceptance/01_skeleton.md`。之后一次只实现一个关卡或一项规则，每项都要独立伪代码、独立审核、独立开关、独立测试和独立验收。
+> **用途**：本文件既是源码审计后的可执行开发计划，也是后续唯一的持续进度记录。每次开始工作前先重新查看本指南；每完成一个简化技术或基础设施模块，立即在本文件记录真实接口、实现范围、测试结果、限制和下一停止点。后续不再创建独立伪代码文档，也不设置“先写伪代码、等待审批”的 P 关。
 >
 > **审计基线**：`819fd7e`，初审日期 2026-11-24，BICP/Equality/Cardinality 与 EDPLLSim component cache 补充审计日期 2026-11-25。本文的调用点、缓存行为和回跳协议已与真实源码核对；行号仅用于该基线，后续优先按函数名定位。所有“建议新增”的接口仍是下一关设计，不是现有 API。
 >
 > **用户已经确定的设计**：只实现普通无权精确模型计数 **MC**，不为 PMC/WMC/WPMC 开发新简化逻辑；暂不改根预处理算法；新简化位于冲突学习生效后的下一次无冲突传播与分解之间；所有简化技术统一放入 `core/simplify.h` 与 `core/simplify.cc`，沿用 PBMC/RoundingSat 的公共数据结构，不为每条规则拆文件或重复造容器；AP 与 FLP 合并为 **BICP（Bidirectional Implication and Conflict Probing）**；所有规则强制 Equality-aware；Equality-specific Simplification 作为独立增强方向。开发顺序固定为**变量简化完成 → Cache Bypass → 参考 EDPLLSim 完成 residual component cache → 系数简化 → 约束简化**；系数阶段采用 **CS（单行系数饱和）→ GCD → RoundingSat Cardinality normalization → Multi-row SC**，后期再加入经精确复核的 **SC-LP**；先完成并验证各技术，最后才添加 Adaptive K。这里“先完成 cache”是开发关卡顺序，运行时 cache lookup 仍在分量分解之后。
 >
-> **v1.1 的重要限制**：新框架只允许普通 MC（当前 `-mode=0`）且关闭 d-DNNF；`-mode=1/2/3` 全部拒绝进入新简化框架。PMC/WMC/WPMC 的既有测试只保留在审计记录中，不属于实施范围。0B/0E 的 Release 与 ASan/UBSan 基线已经通过；目前仍没有安全 cache-off。
+> **v1.1 的重要限制**：新框架只允许普通 MC（当前 `-mode=0`）且关闭 d-DNNF；`-mode=1/2/3` 全部拒绝进入新简化框架。PMC/WMC/WPMC 的既有测试只保留在审计记录中，不属于实施范围。0B/0E 的 Release 与 ASan/UBSan 基线已经通过；`-simp-cache=bypass` 已作为整次运行不 lookup/store 的安全无复用 oracle，Legacy 不是结构改写模式。
+
+> **2026-11-26 当前停止点**：Gate 0B、0E、1、Basic、BICP、Cache Bypass、residual cache、CS、GCD、RoundingSat Cardinality normalization 与 Pairwise Multi-row SC residual-view commit、EqualityGroup 原子 overlay/undo、ComponentManager 动态 overlay 读取，以及 cache entry 入口快照/模板引用 ownership 已实现，并通过当前 22 项 Release 与 ASan/UBSan 测试。Pairwise SC 使用最新 residual target、当前 trail 下的 immutable attached 母版 helper、提交前精确重验证和一次一系数事务，仍不改 attached RoundingSat 约束或 Reason。下一模块是 4A RIR：只处理约束的可撤销 active 状态，不重复 Basic 已完成的检查。
 
 ---
 
 ## 0. Codex 的执行合同（必须逐条执行）
 
-1. **当前停止点是 Gate 2A-P**。Gate 1 已通过验收；本轮只交付 `docs/inprocessing/pseudocode/01_basic.md`。Basic 的六项决定经用户审核前不得开始 Gate 2A-I。
+1. **当前停止点以上方持续状态为准**。正文中的早期 Gate 结论只保留为历史设计背景；继续开发时先核对真实代码和本文件顶部状态，不按已经过期的 P/I 停止点回退。
 2. **不修改旧 PBInstance 根预处理算法**。保留硬编码的 `simplifyRenumberedConstraint()`、输入解析和现有 `postProcess()` 行为；发现的根层问题先建基线测试、单独排期，不混入递归简化规则。
 3. **统一文件，规则可独立开关**。所有简化规则的声明、结果类型和最小共享状态放在 `core/simplify.h`，实现放在 `core/simplify.cc`；规则以 `Simplifier` 的短方法区分并独立消融，不再建立 `Basic.h`、`SC.h`、`Rir.h` 等规则文件，也不为每个概念建立抽象类、adapter 或重复容器。优先复用 `CeSuper/ConstrExp`、trail、Component/Decision、现有 occurrence 和精确整数类型。
-4. **一次只做一个可验收版本**。单项变更包含规则、短开关、最小测试、计数差分、必要统计和验收文档；失败时只修该项。
+4. **一次只做一个可验收版本**。单项变更包含规则、短开关、最小测试、计数差分和必要统计；失败时只修该项。完成后把接口、测试、限制和下一步同步回本指南，不再另写伪代码文档。
 5. **所有新功能默认关闭**。PBMC 的 CLI 采用单横线 MiniSat 风格，因此预定总开关写作 `-inprocess`/`-no-inprocess`，不是 `--inprocess`；最终名称在增加配置的同一关确定。
 6. **当前先不实现 K 自适应**。保持三个阶段的固定先后顺序；非 LP/LP 增强分别通过明确开关与固定预算测量。后续独立阶段才引入 K 选择，不改变数学规则。
 7. **所有新增递归改写必须守住普通 MC 语义**。本计划只验收完整布尔赋值的无权精确模型数；`-inprocess` 对 PMC/WMC/WPMC 和 d-DNNF 明确拒绝，不能静默运行未实现组合。以后删除 projected/weighted 代码应作为独立清理任务，不与规则实现混做。
 8. **禁用不可靠的浮点推断**。涉及系数、gap、逻辑蕴含的判断使用精确整数/有理运算；LP 结果在无可核验的精确证书前只能做候选，不能据此删行、固定变量或替换系数。
 9. **不直接原地修改已 attach 的 `rs::Constr`**。真正的残余结构改写必须通过 detached row 与最小可回溯 overlay，或经过证明的重建方案；同步 solver、ComponentManager、reason、缓存和 undo 后才能影响分解。
 10. **源码事实优先**。行号变化时按函数名重新定位；`rs::CRef`、`Constr::id`、ComponentManager allocator reference 和本地 `ClID` 不得混用。
-11. **未通过关卡，禁止进入下一关**。每关提交：变更文件、数学正确性说明、测试日志、计数对照、性能统计、已知限制、当前开关/缓存模式以及是否通过。由用户确认后继续下一项。
+11. **未通过关卡，禁止进入下一关**。每关记录：变更文件、数学正确性说明、测试日志、计数对照、性能统计、已知限制、当前开关/缓存模式以及是否通过；这些内容统一更新到本指南的进度记录中。
 12. **禁止一次性重写求解器或公共数据结构**。维护可回退、可 bisect 的提交；公共结构只做经测试证明必要的最小改动，并同步 `pbmc-mod/` 持久副本。
-13. **伪代码必须先于实现并独立审核**。每项技术先单独创建 `docs/inprocessing/pseudocode/NN_<name>.md`，只写数学契约、伪代码、状态恢复、Reason、Equality、cache/overlay、预算和测试；提交后停止。用户审核通过后，下一关才允许修改 C++。禁止在同一关里“边写伪代码边完成实现”。
+13. **不再设置伪代码关**。实现前仍须在本指南和真实源码中核对数学契约、状态恢复、Reason、Equality、cache/overlay、预算与测试，但核对后直接实现当前单一模块；若实现迫使数学条件或恢复协议发生变化，先更新本指南中的对应设计说明，再继续编码。
 14. **Equality-aware 是每项规则的准入条件**。输入 `>=`、`<=`、`=` 必须保持完全相同的模型集合；`<=` 先精确规范为 `>=`，`=` 作为两个方向组成的同一 EqualityGroup 管理。任何方向缺失、配对身份丢失或不能事务恢复时，该规则只能 no-change。
 15. **Residual component cache 是 CS/SC 前置基础设施**。变量阶段验收后，先完成 Cache Bypass，再完成 EDPLLSim 风格的 canonical residual key、精确判等、行模板生命周期、淘汰、回跳 ownership 和 EqualityGroup identity；全部通过后才能开始 CS，更不能提前进入 Multi-row SC。后续规则只向已经验收的 residual view 发布新 row version，不得为每项技术另造缓存。
 
@@ -58,29 +60,10 @@ docs/inprocessing/
   04_cache_migration.md            # Bypass 与 residual key 证明
   05_test_matrix.md                # oracle、回跳、压力、性能
   06_experiments.md                # 结果和消融表
-  pseudocode/                      # 每项技术一份；审核通过后才允许编码
-    00_equality_contract.md         # 三种 operator 与 EqualityGroup 基础设施
-    01_skeleton.md                  # 空简化框架与传播后、分解前接入
-    01_basic.md
-    02_bicp.md
-    03_component_cache.md          # Bypass、ReferenceKey、模板池、ownership 与淘汰
-    04_cs.md
-    05_gcd.md
-    06_cardinality.md              # RoundingSat 既有转换的接入伪代码
-    07_multi_row_sc.md
-    08_rir.md
-    09_rpr.md
-    10_rsr.md
-    11_rup.md
-    12_equality_specific.md
-    13_sb_lp.md
-    14_sc_lp.md
-    15_rir_lp.md
-    16_adaptive_k.md
   acceptance/                      # 每关一份验收报告
 ```
 
-Prompt 0 只要求已经生成的 `00_code_audit.md` 和本 v1.1。其余文件到对应关卡再创建。
+已有 `pseudocode/` 与 `acceptance/` 文件作为历史材料保留，但后续不再要求创建新文件；新的实现状态与验收结论直接同步到本指南。
 
 ---
 
@@ -156,9 +139,9 @@ $$
 3. 单方向等价规范化仍需记录在所属 group 中；禁止原地改 attached row。声称“删除整个 equality”必须证明两个方向都可删除；若只证明一边冗余，只能把该方向标成有证明依赖的 inactive row，不能把整个 group 标成 removed。
 4. cache/residual identity 对 equality 序列化 group marker、两个 canonical 方向的**当前内容**及 active 状态；`RowVersion` 只用于选择当前不可变内容，运行时 version/group ID/revision 本身不是数学 key。两个方向的更新只能整体发布，哈希后仍做完整内容比较。
 5. `<=` 已在 0E 通过 checked arithmetic 精确规范为 canonical `>=`；溢出或非法 comparator 明确拒绝，不能静默猜测关系。这项输入语义修复没有授权重写旧根预处理算法。
-6. 每项伪代码文档都必须有 `>=`、`<=`、`=` 三栏，列出方向映射、proof 前提、commit/undo 和模型集合 oracle；缺任一栏不得进入实现。
+6. 每项技术在实现和本指南进度记录中都必须覆盖 `>=`、`<=`、`=`，核对方向映射、proof 前提、commit/undo 和模型集合 oracle；缺任一类覆盖不得标记完成。
 
-Equality-specific Simplification 是后续独立方法 `Simplifier::equality()`：它研究只有联合两个方向才能得到的额外界、成组冗余或其他等价化简。首版不包含变量代换/消元；在独立数学定义和伪代码获批前只保留默认关闭入口，不把它混进通用 equality-aware 基础设施。
+Equality-specific Simplification 是后续独立方法 `Simplifier::equality()`：它研究只有联合两个方向才能得到的额外界、成组冗余或其他等价化简。首版不包含变量代换/消元；在数学定义、精确证明和测试反例明确前只保留默认关闭入口，不把它混进通用 equality-aware 基础设施。
 
 ---
 
@@ -228,7 +211,7 @@ Equality-specific Simplification 是后续独立方法 `Simplifier::equality()`�
 
 ```text
 core/simplify.h     # SimpStatus/SimpResult、Simplifier 声明、必要的最小共享状态
-core/simplify.cc    # run/basic/bicp/cs/gcd/normalizeCardinality/multiRowSC/
+core/simplify.cc    # run/basic/bicp/cs/gcd/card/sc/rir/rpr/rsr/rup/
                     # rir/rpr/rsr/rup/equality/sbLP/scLP/rirLP/undoTo
 ```
 
@@ -312,30 +295,15 @@ NormalizeA(row_or_equality_group):
 
 RoundingSat 已在 `ConstrExp::postProcess()` 中调用等价保持的 `simplifyToCardinality(true)`；`toConstr()` 随后根据 `propCard` 和最大系数选择专用 `Cardinality` 或通用传播对象。因此 PBMC **保留该功能但不另造一项新算法**：`normalizeCardinality()` 只是 NormalizeA 的内部封装，直接复用现有实现。它仍设独立接入验收关，因为 detached 内容会变为全 1 系数，commit 后可能改变 `Constr` 具体类型、watches、Reason 对象和 cache identity；view-only 成功绝不代表 attached 对象已安全替换。
 
-EDPLLSim 的 `coefficientStrengtheningSingle()` 面向一般整数域 `Ax<=b`，逐行利用变量上下界调整系数和 RHS；对规范布尔 PB `sum(a_i*l_i)>=gap`，本项目采用的安全布尔特例就是 `a_i=min(a_i,gap)`。按用户已有文档术语，本指南将它统一称为 **CS（coefficient saturation，系数饱和）**，实现为 `Simplifier::cs()` 并复用 detached `ConstrExp::saturate()`；不再把它叫单行 SC。`multiRowSC()` 和 `scLP()` 则明确依赖目标行以外的约束。
+EDPLLSim 的 `coefficientStrengtheningSingle()` 面向一般整数域 `Ax<=b`，逐行利用变量上下界调整系数和 RHS；对规范布尔 PB `sum(a_i*l_i)>=gap`，本项目采用的安全布尔特例就是 `a_i=min(a_i,gap)`。按用户已有文档术语，本指南将它统一称为 **CS（coefficient saturation，系数饱和）**，实现为 `Simplifier::cs()` 并复用 detached `ConstrExp::saturate()`；不再把它叫单行 SC。`sc()` 和 `scLP()` 则明确依赖目标行以外的约束。
 
 **注意**：CS → GCD 对固定的规范不等式一次即可达到二者不动点；当赋值、Multi-row SC、SC-LP 或其他合法规则改变行时，再对变化行调用 NormalizeA。不是在 CS/GCD 之间无上限循环。
 
-### 3.5 每项技术的伪代码前置关
+### 3.5 每项技术的实现与同步规则
 
-每项技术都拆成两个不同回合：
+后续不再拆分 Pseudocode/Implementation 两个回合，也不再创建独立伪代码文档。每次只处理一个技术或基础设施模块，并按以下顺序完成：先重新查看本指南和相关真实源码；核对目标、明确不做事项、`>=/<=/=`、调用前后不变量、Reason、EqualityGroup、overlay/cache、预算与反例；随后直接实现最小变更并运行对应 oracle、回跳和 sanitizer 测试；最后把真实接口、测试结果、限制与下一停止点同步到本指南。
 
-```text
-Gate X-P（Pseudocode）
-  只创建/修订 docs/inprocessing/pseudocode/NN_name.md
-  运行数学小例或只读源码核对
-  禁止修改 C++
-  提交给用户审核并停止
-
-Gate X-I（Implementation）
-  仅在对应 P 文档获批后开始
-  按已批准伪代码修改 simplify.h/.cc 和必要最小接入
-  若实现迫使数学/状态机发生实质变化，先退回更新 P 文档并再次审核
-```
-
-每份伪代码文档必须含：目标与明确不做事项、规范输入及 `>=/<=/=` 三种关系、调用前后不变量、逐步伪代码、返回状态、精确证明、临时假设与 rollback、Reason 生命周期、EqualityGroup 事务、overlay/cache/dependency、预算与 UNKNOWN、正例/反例、完整模型集合 oracle、预计修改接口。Cardinality 文档写的是 RoundingSat 既有转换如何接入，不重复发明算法。
-
-`03_component_cache.md` 是同样强制的基础设施伪代码文档：它不需要虚构数学简化返回状态，而要写清 ReferenceKey 与 packed key 的一一对应、无损大整数编码、lookup/insert 的引用所有权、hit/miss/update/evict/clear/backjump 的状态迁移、EqualityGroup 原子发布、hash collision 反例和 Bypass 计数 oracle。该 P 关获批前不得迁移 cache C++。
+若实现发现数学条件、缓存 identity、ownership 或恢复协议与本指南不一致，先在本指南中修正该设计，再继续当前模块，不能在规则内部临时补一套专用 key、Reason 或回滚机制。Cardinality 仍只记录 RoundingSat 既有转换如何接入，不重复发明算法。
 
 ### 3.6 固定预算、禁用 K
 
@@ -361,8 +329,8 @@ Gate X-I（Implementation）
 
 本关不是简化算法，但它是所有规则的输入语义前置条件。
 
-1. **0E-P**：只创建 `docs/inprocessing/pseudocode/00_equality_contract.md`，准确描述 PBMC 输入 comparator、`<=` 转换、RoundingSat equality 双向展开、EqualityGroupID/RowVersion 映射、事务 undo/cache identity 和故障测试；停止等待审核。
-2. **0E-I**：获批后才实现最小 comparator/canonicalization 与 group metadata。不得改动旧根简化规则；只修正/拒绝输入关系并保留两方向身份。
+1. **0E 设计核对（历史已完成）**：核对 PBMC 输入 comparator、`<=` 转换、RoundingSat equality 双向展开、EqualityGroupID/RowVersion 映射、事务 undo/cache identity 和故障测试。
+2. **0E 实现（历史已完成）**：实现最小 comparator/canonicalization 与 group metadata。没有改动旧根简化规则；只修正/拒绝输入关系并保留两方向身份。
 3. `<=` 在实现通过前 fail-fast；实现后以原式完整模型集合为 oracle，不以转换后的自比较代替。
 4. `=` 两个方向在 solver、ComponentManager frozen rows、ResidualOverlay 和 cache builder 之间必须可追踪到同一 group；原始 row ID、两个 solver CRef 和两个 Component ClID 仍严格区分。
 5. 本关不执行 CS/BICP/RIR 等任何新规则。空 group overlay 下，已有 `>=`/`=` MC 行为与 baseline 一致。
@@ -406,7 +374,7 @@ Gate X-I（Implementation）
 
 **测试**：原指南中的 `5x+2y+z>=4`、`2x+3y>=3` 和 `3~x+2y>=3` 由 native UP 完成固定，Basic 随后只观察 satisfied；`2x+3y>=6` 在进入 Basic 前冲突；`2x+3y>=0` 为 ROOT_TRUE；`x+y>=1` 验证 OPEN。另测非根 Reason、强制 GC、missed-propagation 故障注入、equality 双方向、组件范围和 cache/stat 差分。
 
-**验收门槛**：`pseudocode/01_basic.md` 的六项决定先获审核；规则独开时 oracle 一致、trail/Reason/结构/cache 完全不变、传播遗漏 fail-closed、formula RowVersion 跨 cleanup/GC 仍可解析，然后再做 BICP。
+**验收门槛**：规则独开时 oracle 一致、trail/Reason/结构/cache 完全不变、传播遗漏 fail-closed、formula RowVersion 跨 cleanup/GC 仍可解析，然后再做 BICP。
 
 ### 5.2 关卡 2B：BICP 双向探测引擎（`Simplifier::bicp()`）
 
@@ -440,7 +408,7 @@ bicp(x):
 
 **示例**：`x+y>=1`, `~x+y+z>=2`, `~y+t>=1`；两侧均推出 `y=1,t=1`，BICP 提取公共蕴含。验证不发生 trail/Reason 泄漏、不会对 y/t 重复计数。
 
-**验收门槛**：先审核 `pseudocode/02_bicp.md`；随后正反 probe 状态逐字段恢复、UNKNOWN 安全、equality 两方向均参与、普通 MC 与 oracle 一致。view-only 引擎通过后才允许正式提交推导。
+**验收门槛**：正反 probe 状态逐字段恢复、UNKNOWN 安全、equality 两方向均参与、普通 MC 与 oracle 一致。view-only 引擎通过后才允许正式提交推导。
 
 ### 5.3 关卡 2C：BICP 推导提交（仍为 `Simplifier::bicp()`）
 
@@ -476,7 +444,7 @@ bicp(x):
 
 ### 5.6 关卡 2E：完成 EDPLLSim 风格的 residual component cache
 
-这是变量阶段与 CS/SC 之间的**硬关卡**，不是以后再做的性能优化。先执行 **2E-P**：只创建 `docs/inprocessing/pseudocode/03_component_cache.md`，写清 identity、序列化、lookup/store、模板引用、ownership、淘汰、回跳、EqualityGroup 和反例；用户审核后才进入实现。实现仍沿用 `core/Component.h`、`core/ComponentCache.cc`、`core/ComponentManager.cc`，不新建第二套 cache manager，也不把缓存代码塞进 `simplify.cc`。
+这是变量阶段与 CS/SC 之间的**硬关卡**，不是以后再做的性能优化。实现前直接核对 identity、序列化、lookup/store、模板引用、ownership、淘汰、回跳、EqualityGroup 和反例；实现仍沿用 `core/Component.h`、`core/ComponentCache.cc`、`core/ComponentManager.cc`，不新建第二套 cache manager，也不把缓存代码塞进 `simplify.cc`。
 
 已完整核对 `AAAI_EDPLLSim/src/cache.h/.cc`、`solver.cc::count()` 和 `linear_constraint.cc::insertCache/findCache/initializeCacheForInstance()`。本关采用“**迁移经过验证的 cache 内核，重写 PBMC 状态适配层**”：
 
@@ -488,9 +456,26 @@ bicp(x):
 
 允许直接迁移或轻改的代码形状是 `SerializedComponentKey`、完整字节判等、行模板池的 probe/intern/release/reclaim、插入序列链和批量淘汰；必须按 PBMC 重写的部分是 EDPLLSim 的稠密整数域 `Ax<=b` normalizer、`ranges`、局部列号、GCD/floor、递归复制式 `LinearConstraint` 状态和 `Int` payload 接口。PBMC 的 `rs::BigVal` 必须无损序列化，不能继续把 residual gap 压成 `int`，也不能用 `double/log` 决定会截断数学身份的位宽。
 
-本关完成的含义是 cache 核心和动态 row-version 接口均已验收；以后 CS/GCD/SC 只通过同一个 residual overlay 发布新版本并触发既有 key builder。若某项规则迫使 cache identity 或 ownership 重新设计，应退回 2E 更新伪代码和测试，不能在该规则内部补一套专用 key。
+本关完成的含义是 cache 核心和动态 row-version 接口均已验收；以后 CS/GCD/SC 只通过同一个 residual overlay 发布新版本并触发既有 key builder。若某项规则迫使 cache identity 或 ownership 重新设计，应先更新本指南中的 2E 设计和测试，不能在该规则内部补一套专用 key。
 
-验收文件分为 `acceptance/02E1_reference_key.md`、`02E2_template_key.md`、`02E3_ownership.md`、`02E4_eviction.md` 和 `02E5_cutover.md`。五项未全部 PASS，不进入 3A CS。
+2E1–2E5 的状态以后统一记录在本指南，不再要求分别创建验收文件。ReferenceKey、模板池、ownership、淘汰、三模式 cutover 与动态读取层已经通过；overlay commit 后对已有 cache entry 的 identity 刷新仍是进入 committed CS 前的最后一个 cache 子模块。
+
+#### 2026-11-25 动态 overlay 读取模块（已完成）
+
+- `ComponentManager::init()` 接收只读 `const SimpRows*`；`PBcounter::count_main()` 传入唯一的 `simp_rows_`，没有建立第二套 residual 容器。
+- `ComponentManager::effectiveRow()` 以 `ComponentBind.version` 定位 overlay；没有新版本时读取 frozen `pbca_`，有版本时校验 EqualityGroup/RowSide 并读取当前 content/active。
+- `referenceKey()` 与 `searchComponent()` 共用该入口。frozen occurrence list 只作保守超集：inactive 行被忽略，已移除的文字不会连接分量，活动残余行仍使用精确系数和 gap。
+- Legacy 模式一旦遇到非空 overlay 立即拒绝；Bypass/Residual 才允许消费动态版本。attached solver 约束没有被修改，Reason/CRef 生命周期不变。
+- 单测覆盖普通行 key 变化、EqualityGroup 成组变化、inactive bridge 产生两个分量、decision-scope 更新回跳后恢复旧 key，以及 Legacy fail-closed；完整 Release 18/18、ASan+UBSan 18/18 通过。
+- 后续约束：活动 component 的 cache key 是“进入该组件时的子问题快照”，不是 store 时的瞬时公式。严格等价的 overlay commit 不刷新父 entry；commit 后新创建的子组件读取新 overlay 建 key。若变化不是严格等价，则不能作为 simplification commit，不能依靠改 key 或清 cache 掩盖。
+
+#### 2026-11-25 cache entry 入口快照与模板 ownership（已完成）
+
+- 源码核对确认：`CachedComponent` 的 key 表示组件进入时的子问题，内部严格等价简化不能刷新父 entry；父 entry 完成后把计数存回入口快照，新建子 entry 才读取最新 overlay。
+- `PendingComponentKey` 只能初始化一次；Residual lookup 必须持有 pending 且尚无 compact/ref；store 只能执行一次 `pending → compact`，随后取得模板引用并清除 pending。重复 store、重复 finalize 或状态混用立即 fail-closed。
+- lookup 临时 entry 只 `probe()`，不会 acquire 模板；只有成功 store 的 persistent entry 持有引用。erase、污染清理、淘汰和析构继续通过 `releaseTemplates()` 成对释放。
+- 新增精确引用总数观测用于单测：入口旧视图 store 后引用数为 1；overlay 新视图 lookup miss 和恢复旧数学视图后的 hit 均不增加引用；重复 store 被拒绝。
+- 完整 Release 18/18、ASan+UBSan 18/18 通过。该结论取代此前“overlay 后刷新/失效当前 entry”的设想；刷新入口 key 会把原子问题的 count 错挂到搜索中途状态，因此禁止。
 
 ---
 
@@ -512,8 +497,19 @@ bicp(x):
 - CS 只读取目标行自身及当前 trail 形成的 residual gap，不读取辅助行，不新增非零项，也不产生多行 proof dependency。
 - 测试 `8x+3y+2z>=5 ↔ 5x+3y+2z>=5`、负文字 `8~x+3y+2z>=5`、已赋值后 residual gap 减少、大整数溢出、`gap>sum` 冲突。
 - 首次以 view-only 正确性为验收，然后在下一次**独立变更**中启用 committed residual rewrite（须使用已通过的 residual cache + Bypass oracle + overlay）。
+- 3A 的首个 commit 明确限定为 **residual-view commit**：发布当前 scope 下与原行严格等价的 overlay 内容，供分解和 cache identity 使用；RoundingSat 中原 attached 行保持 ACTIVE、继续传播并作为 Reason。它不是 solver constraint replacement，因此不触发 9.3 的 RETIRED_REASON 回收流程。以后若要让新物理约束参与传播，仍须另行实现 9.3 的安全版本生命周期。
 
 **验收**：数学等价验证、与 EDPLLSim 单行强化的布尔特例及 RoundingSat 原 `saturate()` 比对、每次 row version 变化都改变或精确复用 residual identity、Residual↔Bypass 下实际 rewrite 前后普通 MC 一致。
+
+#### 2026-11-26 Gate 3A committed residual view（PASS）
+
+- `Simplifier::cs()` 先读取当前 `SimpRows` 版本；没有 overlay 时才从 attached `rs::Constr` 构造 detached residual row。它只消去当前 trail 已赋值文字并调用 RoundingSat 原生 `saturate()`，没有复制一套手写饱和算法。
+- Legacy 保持 view-only：记录 proposal，但 `CS commits=0` 且不允许消费 overlay。Bypass/Residual 使用同一个 `SimpRows::set()`；EqualityGroup 候选使用 `setGroup()` 同时发布两个方向，禁止半更新。一次提交返回 `ROW_CHANGED`，`count_main()` 重新进入原生传播与简化联合循环，达到不动点后才分解和查询 cache。
+- attached constraint、watch、allocator、solver logical ID 和 `Reason` 完全不变。专用反例 `6x1+5x2+4x3+x4>=10` 在决策 `~x4` 后由原行推出 `x1` 并成为 live Reason，随后 CS 把 residual `5x2+4x3>=4` 饱和为 `4x2+4x3>=4`；提交前后 Reason/CRef/allocator 内容相同，回跳到 0 后 decision-scope overlay 消失。
+- cache entry 继续保存组件入口快照，CS 不刷新父 entry key。当前 entry 的等价子问题计数仍存回入口 key；CS 后创建的新组件才读取新 overlay identity。这与 2026-11-25 已验收的 pending→compact 和模板引用 ownership 契约一致。
+- 固定 `>=`、负文字、64 位大系数、`<=`、`=`、两分量、无文字回跳与 20 个固定 seed 随机普通 MC 实例均与独立穷举 oracle 一致；Legacy/Bypass/Residual 三种模式均覆盖。Release 18/18 通过；`ASAN_OPTIONS=detect_leaks=0` 下 ASan+UBSan 18/18 通过（执行环境的 ptrace 限制使 LeakSanitizer 无法运行，不是代码泄漏诊断）。
+- 真实修改集中在 `core/simplify.h/.cc`；`core/Counter.cc` 只接入 `ROW_CHANGED/ROW_REMOVED → continue` 和 `CS commits` 统计；同步修改测试、本文与 `pbmc-mod/core` 持久副本。未创建规则专属文件或伪代码文档。
+- 限制：这仍是 counting/residual-view commit，不是 solver physical replacement；overlay 不参与新的原生传播，原 attached 行继续负责所有传播与冲突解释。Pairwise SC 仍冻结为 view-only；后续系数规范化继续沿用同一边界。
 
 ### 6.2 关卡 3B：GCD（`Simplifier::gcd()`）
 
@@ -523,7 +519,19 @@ bicp(x):
 
 **验收**：单项可开关；序列化前后的 exact 数值一致；同一行 repeated call 幂等；commit 路径的 cache/undo/propagation 契约通过。
 
-### 6.3 关卡 3C：RoundingSat Cardinality normalization 接入（`normalizeCardinality()`）
+#### 2026-11-26 Gate 3B committed residual view（PASS）
+
+- `Simplifier::gcd()` 读取统一 `CurrentRow`；该 helper 从 `SimpRows` overlay 或不可变 attached/root 行构造当前 residual，统一完成 trail 赋值消去、gap 调整、满足/冲突检查。CS 已改为复用同一 helper，没有为 GCD 再建立一套 residual builder。
+- GCD 直接复用 RoundingSat detached `ConstrExp::divideByGCD()`：对已饱和的当前行计算正系数 gcd，并把 degree 精确上取整。正式顺序为 `CS → GCD`；若单独消融 CS 导致输入尚未饱和，GCD 安全返回 no-change，不暗中代做 CS。
+- Legacy 只统计可行 proposal，不发布 overlay；Bypass/Residual 通过现有 `SimpRows::set()` 发布单行版本。EqualityGroup 的两个 detached 方向分别规范化、通过一次 `setGroup()` 原子发布和撤销，即使只有一个方向变化也不会留下半更新。
+- attached constraint、watch、allocator、solver logical ID 与 live `Reason` 均保持不变。专用 Reason 用例在原行完成传播后执行 residual GCD，核对 Reason/CRef/allocator 内容未变，并验证回跳移除 decision-scope overlay。因此本关仍是 counting residual-view commit，不是 solver physical replacement。
+- cache 继续使用组件入口不可变快照；GCD 不刷新父 entry key。GCD 后新建组件通过既有动态 overlay/RowTemplatePool 读取规范化行，Residual cache 与完全不 lookup/store 的 Bypass 得到相同精确 MC。
+- `-ablation` 保留一个入口：Basic=1、BICP=2、CS=3、SC=4，新 GCD=5。`Simplifier::run()` 中对应调用保留 `// GCD` 注释，并在一次 commit 后返回 `ROW_CHANGED`，由主循环重新传播和简化直至不动点。
+- `gcd-test` 覆盖普通行、负文字、64 位大系数、等式双方向、CS→GCD、幂等、live Reason、回跳、Legacy view-only、消融与母版不可变；`run_gate_3b.py` 覆盖 `>=`、`<=`、`=`、组件、回跳及 20 个固定 seed 随机 exact MC oracle。Release 20/20、`ASAN_OPTIONS=detect_leaks=0` 下 ASan+UBSan 20/20 通过（LeakSanitizer 仍因执行环境 ptrace 限制关闭）。
+- 真实代码仍集中于 `core/simplify.h/.cc`，仅在 `Config.*`、`Counter.cc`、CMake 与测试中增加短开关、统计和验收入口，并已同步 `pbmc-mod/core`。未创建 GCD 专属源码文件或伪代码文档。
+- 限制：overlay 仍不参与 RoundingSat 原生传播，且本关不创建/替换物理 Cardinality constraint；下一停止点仅为 3C detached cardinality 内容规范化与相同 residual-view/Reason/cache 契约验收。
+
+### 6.3 关卡 3C：RoundingSat Cardinality normalization 接入（`Simplifier::card()`）
 
 **结论：保留功能，不把它单列为 PBMC 新算法。** 源码已经确认：
 
@@ -535,9 +543,22 @@ PBMC 只写一个很薄的内部调用：在最新 detached row 上复用 `simpl
 
 工程上仍保留独立 3C 验收，因为 commit 会改变系数内容，并可能改变 allocator 中的具体 `Constr` 类型、watch 布局和后续 Reason。禁止给已 attach 对象原地换 type 或系数；必须创建新版本并遵守第 9 节生命周期。对 equality，两个方向分别在 detached 状态调用，随后按 EqualityGroup 原子发布/撤销；cache identity 同时更新两边。
 
-**测试**：先审核 `pseudocode/06_cardinality.md`；验证 `3x+3y+2z>=5 ↔ x+y+z>=2`、非 cardinality 反例、负文字、`<=` 规范行、equality 两方向、`propCard` 开/关、Reason pin、GC、兄弟分支和 cache identity。比较每个完整赋值，且把 `postProcess()` 输出与 PBMC wrapper 逐字段对照。
+**测试**：验证 `3x+3y+2z>=5 ↔ x+y+z>=2`、非 cardinality 反例、负文字、`<=` 规范行、equality 两方向、`propCard` 开/关、Reason pin、GC、兄弟分支和 cache identity。比较每个完整赋值，且把 `postProcess()` 输出与 PBMC wrapper 逐字段对照。
 
-### 6.4 关卡 3D：两行 Multi-row SC（`Simplifier::multiRowSC()`）
+#### 2026-11-26 Gate 3C committed residual view（PASS）
+
+- 按项目的短命名约定实现 `Simplifier::card()`，正式顺序为 `CS → GCD → Cardinality → SC`，调用行标注 `// Cardinality`。实现只在统一 `CurrentRow` 产生的 active/open residual 上工作；未饱和行安全 no-change，不暗中代做 CS。
+- detached 行仅调用 RoundingSat 原生 `sortInDecreasingCoefOrder()` 与 `simplifyToCardinality(true)`，没有复制其判定公式。成功后额外核对输出确为 saturated cardinality，再通过既有 overlay 发布；`3x+3y+2z>=5` 得到 `x+y+z>=2`。
+- RoundingSat `postProcess()` 的 `removeUnitsAndZeroes()` 只消去其 unit 语义，不能代替递归 decision trail 的 RV。Gate 3C 测试先显式构造当前 residual，再将 `postProcess()` 输出与 `card()` overlay 按 literals、coefficients 和 degree 逐字段比较；两者完全一致。
+- Legacy 只统计 proposal，不发布 overlay；Bypass/Residual 使用 `SimpRows::set()`。EqualityGroup 两个方向分别检测，并始终通过一次 `setGroup()` 原子发布/撤销；测试覆盖仅 lower 方向变为 cardinality、upper 内容不变的半边变化场景，仍保持同一 transaction。
+- attached CRef、watch、allocator 内容、solver logical ID 和 live `Reason` 不变。本关不会调用 `toConstr()`，因此 `propCard` 开/关都不影响 residual 内容，也不会声称创建物理 Cardinality propagator；单测分别关闭/开启 `rs::options.propCard`，并在 live Reason 存在时强制 allocator GC，确认 CRef/Reason 正确搬迁且 overlay 仍按稳定 RowVersion 可读。
+- cache entry 仍是组件入口不可变快照；Cardinality commit 不刷新父 entry key，新组件才从动态 overlay/RowTemplatePool 读取全 1 系数行。Residual 与 Bypass 的普通 MC 结果一致，回跳删除 decision-scope overlay，兄弟分支重新从母版构造 residual。
+- `-ablation` 仍只有一个入口，新调试编号为 6（`Cardinality`）；它用于单项定位，不把 RoundingSat 已有转换包装为论文新算法。统计为 calls/rows/equality rows/changed rows/commits，刻意不提供 `specialized_attached` 成功数，因为本关禁止物理 attach。
+- `cardinality-test` 覆盖正/负文字、64 位大系数、非 cardinality 反例、等式原子事务、GCD→Cardinality 联合循环、`propCard` 开关、live Reason、强制 GC、回跳、Legacy 与消融；`run_gate_3c.py` 覆盖 `>=`、`<=`、`=`、组件、兄弟分支/回跳、三种 cache 模式及 20 个固定 seed 随机 exact MC oracle。Release 22/22、`ASAN_OPTIONS=detect_leaks=0` 下 ASan+UBSan 22/22 通过。
+- 真实代码仍集中于 `core/simplify.h/.cc`，只在 `Config.*`、`Counter.cc`、CMake 和测试增加短开关、统计与验收入口，并已同步 `pbmc-mod/core`；没有创建规则专属源码或伪代码文档。
+- 限制：这仍是 counting residual-view commit，overlay 不参与新的原生传播；下一停止点是把已冻结的 Pairwise Multi-row SC view-only 候选升级为一次一系数、提交前重验证的 residual commit，仍不替换 attached solver row。
+
+### 6.4 关卡 3D：两行 Multi-row SC（`Simplifier::sc()`）
 
 对当前作用域中的规范目标行
 
@@ -586,13 +607,13 @@ $$
    L=\max\left(0,\left\lceil\frac{pk_h+m}{q}\right\rceil\right)
    $$
 
-   是安全下界。候选比例首版只取 `0`、`1`、共享文字系数比和公共文字法的最小比；不同候选得到的下界取最大值，**不能相加**。相反极性、不同支持集和辅助行含目标变量均由同一仿射展开处理。
+   是安全下界。候选比例首版取 `1` 与共享同极性文字的系数比，排序去重后按固定上限截断；`λ=0` 只能给出 0 下界，对已经过 CS 的目标系数不会产生额外缩紧，因此实现不枚举它。不同候选得到的下界取最大值，**不能相加**。相反极性、不同支持集和辅助行含目标变量均由同一仿射展开处理。
 
 公共文字法是便宜过滤器，通用差值界是更一般的精确后备。候选由 frozen occurrence 的保守超集产生，再按当前 active row、scope、revision 和真实 residual 内容过滤；使用 top-Q、pair/nnz/大整数预算时，只允许漏掉可选缩紧，不允许接受未经完整计算的界。
 
 #### 6.4.2 提交、依赖和终止
 
-- 一个 proof 只提出一个 `(target row, target term, helper row, L)`。提交前基于最新两个 row version 和 scope 重新计算；成功后一次只改**一个系数**，立即使该目标行的其余 proposal 失效，递增 revision，并重新执行 `CS→GCD→RoundingSat cardinality normalization→传播`。若目标属于 equality，两个方向的 group staging、identity 和 undo 必须原子更新，即使另一方向内容未变化也要记录同一 group revision。
+- 一个 proof 只提出一个 `(target row, target term, helper row, L)`。提交前重新读取最新 target、确认 helper 当前仍 active/open，并从当前 trail 下的 immutable attached helper 母版完整重算；成功后一次只改**一个系数**，立即使该目标行的其余 proposal 失效，递增 revision，并重新执行传播与 `CS→GCD→RoundingSat cardinality normalization`。若目标属于 equality，两个方向的 group staging、identity 和 undo 必须原子更新，即使另一方向内容未变化也要记录同一 group revision。
 - 禁止把多个“分别安全”的系数同时提交。反例 `5x+5y+5z>=6; x+y+z>=2` 中，每个系数相对旧行都可单独 `5→1`，但三个一起改成 1 会把模型数从 4 变成 0；逐个提交并重算不会犯此错误。
 - 派生行依赖辅助行继续有效。辅助行必须是 frozen 原行，或其完整 proof dependency closure 不含当前目标行；禁止目标↔helper 的循环强化。辅助行若要失活、删除或换 scope，必须先撤销派生版本或在当前保留系统中重新证明；不能删除 helper 后孤立使用旧重写。
 - 非 LP 规则自身只返回 `UNCHANGED/PROPOSED/INVALID/BUDGET` 等内部结果；只有完成 proof、overlay、solver/ComponentManager 同步后，主入口才返回 `ROW_CHANGED/ROW_REMOVED`。它不直接产生 Reason 或真实节点 `CONFLICT`。
@@ -607,6 +628,18 @@ $$
 - 另测 helper 删除、相反极性、批量提交反例、兄弟分支、强回跳、等式展开、`>2^53`/`>2^63` 和预算耗尽；小实例必须比较**完整模型集合**，不能只比较模型数或 SAT。
 
 本关仍遵循 view-only → committed rewrite 两步验收。实际提交前必须通过 residual cache、Bypass oracle、overlay、Reason 生命周期和分量一致性关卡；首版无条件 Multi-row SC 不宣称直接增加 split。
+
+#### 2026-11-26 Gate 3D committed residual view（PASS）
+
+- 正式短接口为 `Simplifier::sc()`，调用顺序保持 `CS → GCD → Cardinality → SC`，调用行标注 `// SC`。目标读取最新 `CurrentRow` residual overlay；helper 先要求当前行仍 active/open，再从 immutable attached 母版按当前 trail 构造 residual 并局部饱和。这样 helper proof 不依赖其他派生 overlay，不需要另造 dependency graph，也不会形成 target↔helper 循环；helper 本身始终保留。
+- 实现使用精确大整数仿射差值下界。候选比例为 `1` 和公共同极性文字的精确系数比，排序去重后最多 4 个；每个 target 最多 8 个 helper、每节点最多 128 对、总工作量最多 200000。支持相反极性和不同支持集；首版没有单独实现公共文字快速路径、共享常数时间差分、三行联合、条件式 SC、SC-LP 或系数删零。
+- 一个 proposal 只保存 target/helper 的稳定 `RowVersionID`、目标文字和精确比例。Bypass/Residual 提交前重新获取最新 target 与 frozen helper，并完整重算下界；一次只改一个系数，随后立即返回 `ROW_CHANGED`。主循环重新进入传播和 `CS→GCD→Cardinality→SC`，因此不会把相对旧 target 分别安全的多个系数批量写入。
+- Legacy 保持 view-only，只记录 proposal，不发布 overlay；Bypass/Residual 通过既有 `SimpRows::set()` 提交。EqualityGroup 通过一次 `setGroup()` 原子发布两个方向，共享 transaction；回跳按 decision-level undo 恢复。cache entry 仍是组件入口不可变快照，父 entry 不被 commit 改写，新子组件由动态 overlay 构造 residual key。
+- attached `Constr/CRef`、allocator 内容、watch、logical ID 和 live `Reason` 全部保持不变。单测先让 attached 行成为非根赋值的 Reason，再执行 SC，确认只出现 overlay；回跳后 overlay 消失而原 Reason/母版生命周期仍合法。本关不创建物理新约束，overlay 也不参与 RoundingSat 的新传播。
+- `sc-test` 覆盖公共同极性、负文字、不同支持、精确差值、64 位大系数、无 helper/无有效界、一次一系数批量反例、EqualityGroup 原子事务、live Reason、回跳、Legacy 与消融。可执行批量反例使用经根规范化仍稳定的 `5x+5y+5z+w>=7; x+y+z>=2`：首个系数只能单独 `5→2`，同时把三个系数写成 2 会改变完整模型集合。
+- `run_gate_3d.py` 对固定例逐项比较完整模型集合，并覆盖 `>=`、`<=`、`=`、组件/回跳、Legacy/Bypass/Residual、20 个固定 seed 随机 exact MC oracle；SC 开关关闭时 calls=0，启用时检查 proposal、revalidation 和 commit 统计。Release 22/22、`ASAN_OPTIONS=detect_leaks=0` 下 ASan+UBSan 22/22 通过。
+- 真实代码仍集中在 `core/simplify.h/.cc`；`Counter.cc` 只增加 revalidations/changed rows/commits 统计，CMake 和既有 Gate 3D 测试更新为 committed 命名，并已同步 `pbmc-mod/core`。没有创建规则专属源码或伪代码文档。
+- 限制：这是普通无权 exact MC 的 counting residual-view commit，不是 solver physical replacement；因此当前直接收益只体现在后续 residual 分解/cache/规范化，不能声称已增强原生传播。下一停止点是 Gate 4A `Simplifier::rir()`，不得顺带进入 RPR/RSR/RUP 或 LP。
 
 ---
 
@@ -665,11 +698,11 @@ $$
 
 这是一项独立增强，不等于第 1.4 节的强制 Equality-aware 兼容层。通用规则即使关闭本方法，也必须正确处理 equality 的两个方向。
 
-首份 `pseudocode/12_equality_specific.md` 必须先回答“相比分别处理两个方向，联合处理实际新增了什么可证明简化”。第一版只允许研究：两个方向联合得到的更紧活动界、EqualityGroup 整体冗余证明、两个方向的成组 canonical replacement。暂不做变量代换、Gaussian elimination、消元或改变自由变量计数。
+Equality-specific 首次实现前必须在本指南中回答“相比分别处理两个方向，联合处理实际新增了什么可证明简化”。第一版只允许研究：两个方向联合得到的更紧活动界、EqualityGroup 整体冗余证明、两个方向的成组 canonical replacement。暂不做变量代换、Gaussian elimination、消元或改变自由变量计数。
 
 - 删除整个 equality 必须在排除该 group 两个方向后，分别精确证明保留系统蕴含 lower 与 upper；不得用 sibling 互相证明后同时删除。
 - 成组改写一次生成两个新不可变 row version，并以一个 undo marker 发布；任一方向 proof/attach/cache staging 失败则整组回滚。
-- 若独立伪代码与小实例不能显示超过“两个普通 `>=` 行分别运行现有规则”的新增效果，则该技术保持未实现，不为凑技术数增加重复 pass。
+- 若精确定义与小实例不能显示超过“两个普通 `>=` 行分别运行现有规则”的新增效果，则该技术保持未实现，不为凑技术数增加重复 pass。
 
 ### 7.6 SB-LP、SC-LP、RIR-LP 尚不入主干
 
@@ -689,7 +722,7 @@ $$
 
 Multi-row SC、SC-LP、RPR、RSR、RUP、Equality-specific 或 RIR-LP 若用其他保留行证明目标改写/删行，那么辅助行变化或失活后，旧证明可能失效。首版直接复用 ComponentManager 已有 frozen occurrence 作为保守超集，过滤 inactive row/removed term；必要时再增加轻量 dependency stamp，不先复制 `var → rows`。CS/GCD/RoundingSat cardinality normalization 是单行等价规范化，不产生辅助行依赖，但 equality group commit 仍要同步两个方向的版本。
 
-### 8.3 事件调度伪代码
+### 8.3 事件调度流程
 
 ```cpp
 void assigned(Lit p) {
@@ -982,7 +1015,7 @@ y+w>=1
 z+w>=1
 ```
 
-后三行联合证明 `y+z+w>=2`，所以 SC-LP 可将目标 x 的系数 `8→1`，完整系统前后都是 5 个模型。任意一条 helper 单独只能给更弱的界；这个结果不得写成两行 `multiRowSC()` 必然达到。
+后三行联合证明 `y+z+w>=2`，所以 SC-LP 可将目标 x 的系数 `8→1`，完整系统前后都是 5 个模型。任意一条 helper 单独只能给更弱的界；这个结果不得写成两行 `sc()` 必然达到。
 
 **验收**：至少覆盖上述联合例、目标行污染、候选 L 偏大后 exact checker 拒绝、相反文字、`>2^53` 拒绝、GLPK UNKNOWN、一次一系数、helper 失活、回跳/兄弟分支、Bypass/residual cache 与完整模型集合比较。
 
@@ -1123,21 +1156,38 @@ resource: wall_time, cpu_time, peak_RSS, ASan/UBSan status
 - 运行时间、规则成功率、额外工作：
 - 已知限制和未完成风险：
 - 验收状态：PASS / FAIL / BLOCKED
-- 下一关：仅用户确认后开始
+- 下一模块：记录明确的安全前置条件与继续位置
 ```
+
+### 13.7 持续进度记录（每个模块完成后更新）
+
+| 模块 | 当前状态 | 真实实现与限制 | 最近验证 |
+|---|---|---|---|
+| 0B/0E/1 基础设施 | PASS | exact MC 模式限制、三种 comparator、EqualityGroup/RowVersion、传播后分解前入口 | Release 与 sanitizer |
+| Basic | PASS | 只读检查 RoundingSat UP 不动点，不建立第二套传播 | Gate 2A |
+| BICP | PASS（当前范围） | 双向 probe、failed literal、公共蕴含、正式 guarded Reason；有固定预算 | Gate 2B |
+| Cache Bypass | PASS | 整次运行不 lookup/store，作为后续结构改写计数 oracle | Gate 2D |
+| Residual cache | PASS（动态读取与快照 ownership） | `effectiveRow()` 统一读取 overlay；entry key 为不可变入口快照；pending→compact 一次转换；lookup 不持模板引用，store/erase 成对 acquire/release；legacy 遇 overlay fail-closed | Gate 2E + snapshot test |
+| CS | PASS（residual-view commit） | detached current effective row 调用 RoundingSat saturation；Legacy 只统计，Bypass/Residual 发布可回溯 overlay；attached row/Reason 不变 | Gate 3A + Reason/rollback + oracle |
+| GCD | PASS（residual-view commit） | 复用统一 current residual row 与 RoundingSat `divideByGCD()`；只处理 saturated row；EqualityGroup 原子发布；attached row/Reason 不变 | Gate 3B + Reason/rollback + exact MC oracle |
+| Cardinality normalization | PASS（residual-view commit） | 短 wrapper 复用 `simplifyToCardinality(true)`；只发布等价 residual 内容，不创建物理 Cardinality propagator；EqualityGroup/Reason/GC 安全 | Gate 3C + postProcess parity + exact MC oracle |
+| Pairwise Multi-row SC | PASS（residual-view commit） | 最新 residual target + frozen attached 母版 helper；提交前重验证、一次一系数；EqualityGroup 原子 overlay；attached row/Reason 不变 | Gate 3D + full model-set/batch/Reason/rollback oracle |
+| Residual overlay | PASS（存储/撤销/读取层） | 单行 revision；EqualityGroup 两方向共享 transaction 并原子回跳；ComponentManager 使用 frozen occurrence 超集并过滤 inactive/removed term | overlay unit + ReferenceKey/split test |
+
+**当前继续位置**：实现 Gate 4A `Simplifier::rir()`。先核对 Basic 当前对 satisfied/conflict 的只读处理和 `ComponentManager::effectiveRow()` 对 inactive overlay 的过滤，只提交当前 scope 可撤销的 active 状态；不得永久删除仅由当前 trail 满足的行，不重复计算 Basic 收益，也不在本关进入 RPR/RSR/RUP。Legacy 继续只读，Bypass/Residual 使用既有单行/EqualityGroup overlay；attached row、Reason 和 cache entry 入口快照保持不变。
 
 ---
 
 ## 14. 每关 Codex 必须采用的固定工作循环
 
-1. **P 关只读定位**：说明数学语义、源码入口、与已有 RoundingSat 功能的重叠；只创建该技术的独立 pseudocode 文档，不修改 C++。
-2. **P 关先定 oracle**：写出 `>=/<=/=` 正反例、完整模型集合、Reason/rollback/cache/equality 失败路径和预算 UNKNOWN；提交文档并停止等待用户批准。
-3. **I 关只改统一模块**：获批后才在 `core/simplify.h/.cc` 增加该短方法；骨架/缓存关卡沿用现有文件，不为规则创建新 `.h/.cc` 或空类。
+1. **先查看指南与真实源码**：核对当前停止点、数学语义、源码入口以及与已有 RoundingSat 功能的重叠，不创建伪代码文档。
+2. **先确定 oracle 和失败边界**：覆盖 `>=/<=/=` 正反例、完整模型集合、Reason/rollback/cache/equality 失败路径和预算 UNKNOWN，然后直接实现当前单一模块。
+3. **只改统一模块**：规则只在 `core/simplify.h/.cc` 增加短方法；骨架/缓存关卡沿用现有文件，不为规则创建新 `.h/.cc` 或空类。
 4. **事务式接入递归**：需要 commit 时才增加 reason/overlay/undo；EqualityGroup 两方向原子处理，cache 模式合法。
 5. **完整差分验证**：单项开/关、`>=/<=/=`、Cache Bypass/合法 Native、普通 MC、兄弟分支和非顺序回跳。
-6. **偏离伪代码即暂停**：实现若需要改变数学条件、状态返回或恢复协议，先停止 C++，更新 P 文档并重新审核。
+6. **设计变化先同步指南**：实现若需要改变数学条件、状态返回或恢复协议，先更新本指南对应章节，再继续当前 C++ 模块。
 7. **性能与统计检查**：运行固定小规模数据，记录真实规则命中和开销；只关注本项效果，不变更其他规则/启发式。
-8. **提交验收报告**：列出获批伪代码版本、变更文件、失败案例、测试和配置；停在本关，等待用户批准。
+8. **同步本指南**：列出真实变更文件、失败案例、测试、配置、已知限制和下一停止点；不再创建独立伪代码文档。
 
 **任何为了测试通过而关闭 conflict analysis 或把内部 probe 冲突冒充真实节点冲突的做法，均视为未通过。验收结论只能声明普通 MC；不得宣称 PMC/WMC/WPMC 或 d-DNNF 获得支持。**
 
@@ -1152,8 +1202,7 @@ resource: wall_time, cpu_time, peak_RSS, ASan/UBSan status
 | 2A | Basic/UP/RV view | Legacy，若不改结构 | 2B |
 | 2B | BICP 双向引擎与完整 rollback | Legacy，view-only | 2C |
 | 2C | BICP failed-literal + 公共蕴含正式提交 | Legacy，若只推导赋值 | 2D |
-| 2D | 整次运行 Cache Bypass | Legacy↔Bypass | 2E-P |
-| 2E-P | `03_component_cache.md` 完整设计并审核 | 只读/文档 | 2E1 |
+| 2D | 整次运行 Cache Bypass | Legacy↔Bypass | 2E1 |
 | 2E1 | canonical ReferenceKey 与动态 row-version 接口 | Legacy↔Bypass；ReferenceKey oracle | 2E2 |
 | 2E2 | EDPLLSim 风格 packed key + RowTemplatePool | hash + full compare | 2E3 |
 | 2E3 | PBMC component stack / father-descendant / backjump ownership | Bypass↔Residual | 2E4 |
@@ -1175,35 +1224,31 @@ resource: wall_time, cpu_time, peak_RSS, ASan/UBSan status
 
 > residual cache 现在放在**所有系数/约束结构简化之前**。这样 CS、Multi-row SC 以及后续 RPR/RSR 都从第一天起在正确 identity 下测试；Bypass 始终保留为无缓存计数 oracle。
 
-> 表中每个算法项都隐含 `X-P → 用户审核 → X-I`。`0E` 也先写 `pseudocode/00_equality_contract.md`。没有获批 P 文档，不得开始对应 I 关。
+> 表中每个算法项都直接执行“查看本指南/源码 → 单模块实现 → 测试 → 同步本指南”，不再设置 P/I 两个回合，也不再要求独立伪代码文档。
 
 ---
 
-## 15. Codex 首次任务、单项任务与验收提示词（可直接复制）
+## 15. Codex 单项任务与验收提示词（可直接复制）
 
 ### 15.1 Prompt 0：只审计并修订指南
 
 > （已于 2026-11-24 执行并按用户决定补充）完整阅读第 0.1 节真实存在的资料和源码，只输出 `docs/inprocessing/00_code_audit.md` 与本 v1.1。核对调用点、cache、Reason 生命周期、学习约束可见性、普通 MC、回跳、frozen ComponentManager，以及 EDPLLSim CS/SB-LP/RIR-LP/GLPK 与 Pairwise Multi-row SC 指南；运行 Release、最小例与 sanitizer；如实记录 baseline FAIL。禁止修改根预处理和简化算法。完成后停下等待审核。
 
-### 15.2 Prompt P：只写下一项伪代码
+### 15.2 Prompt 1：查看指南并实现下一单项模块
 
-> 只执行**第 XX-P 关：ShortName Pseudocode**。完整核对真实源码，但只创建或修订 `docs/inprocessing/pseudocode/NN_short_name.md`，写清 `>=/<=/=`、数学证明、逐步伪代码、状态、Reason、BICP/临时假设恢复、EqualityGroup、overlay/cache/dependency、预算、反例和完整模型集合 oracle。禁止修改任何 C++。交付文档后停止，等待用户审核。
-
-### 15.3 Prompt I：获批后只实现该项
-
-> 对应的 `NN_short_name.md` 已由用户批准后，只执行**第 XX-I 关**。严格按获批伪代码在统一 `core/simplify.h/.cc` 和必要最小接入文件中实现，不创建规则专属源码，不顺带实现其他技术。先保存 oracle baseline，再做 `>=/<=/=`、回溯/回跳和合法 cache 模式差分。需要结构改写时，必须先通过 2D/2E 全部 cache 关并使用 residual/equality-group overlay，同时以 Bypass 作 oracle。产出 `acceptance/XX_ShortName.md`、diff 和真实测试命令，然后停止。
+> 先完整查看本指南顶部状态、对应技术章节和真实源码，只实现当前停止点指定的一个技术或基础设施模块。不得创建伪代码文档，不创建规则专属源码，不顺带实现其他技术。先保存 oracle baseline，再做 `>=/<=/=`、回溯/回跳和合法 cache 模式差分。需要结构改写时，必须通过 2D/2E cache 边界并使用 residual/equality-group overlay，同时以 Bypass 作 oracle。完成后把真实接口、测试、限制和下一停止点同步回本指南。
 
 ### 15.4 Prompt 2：验收失败后的修复
 
-> 上一关未通过。仅修复验收报告中的失败项，保留相同随机 seed 和最小反例，不能改动其他规则/缓存算法/启发式掩盖问题；重新跑全部本关 MC oracle、模式拒绝、ASan/UBSan、回跳及 cache bypass，并更新 acceptance 报告。未 PASS 不进入下一关。
+> 上一关未通过。仅修复已记录的失败项，保留相同随机 seed 和最小反例，不能改动其他规则/缓存算法/启发式掩盖问题；重新跑全部本关 MC oracle、模式拒绝、ASan/UBSan、回跳及 cache bypass，并把结果更新到本指南。未 PASS 不进入下一关。
 
 ### 15.5 Prompt 3：缓存专项
 
-> 现在开始**关卡 2E residual component cache**，对应 `pseudocode/03_component_cache.md` 已获批。先复验 2D Bypass；再按 2E1–2E5 完成 canonical `ReferenceKey` oracle、EDPLLSim 风格 `TemplateID + exact gap` 紧凑键、probe-only lookup、insert acquire、full compare、PBMC father/descendant ownership、模板 refcount、实例 clear 和 age+MB 淘汰。只维护普通 MC count payload。禁止用旧 ClID 代表新系数，禁止在 key normalization 时修改 attached solver 约束。全部验收后停止，等待用户批准进入 3A CS。
+> 现在开始**关卡 2E residual component cache**。先复验 2D Bypass；再按 2E1–2E5 完成 canonical `ReferenceKey` oracle、EDPLLSim 风格 `TemplateID + exact gap` 紧凑键、probe-only lookup、insert acquire、full compare、PBMC father/descendant ownership、模板 refcount、实例 clear 和 age+MB 淘汰。只维护普通 MC count payload。禁止用旧 ClID 代表新系数，禁止在 key normalization 时修改 attached solver 约束。全部验收后把状态同步到本指南。
 
 ### 15.6 Prompt 4：最后才做 Adaptive K
 
-> `pseudocode/16_adaptive_k.md` 获批，且所有独立规则、SB-LP/SC-LP/RIR-LP exact checker 和 residual cache 均通过验收后，才在 `simplify.h/.cc` 增加 `adaptiveK()`。保留变量→系数→约束和 CS→GCD→RoundingSat cardinality normalization；K 只选择已经验收的 BICP、Multi-row SC、SC-LP 等高成本增强路径，不关闭 UP/RV/Basic。与固定配置逐组消融，只报告普通 MC。
+> 所有独立规则、SB-LP/SC-LP/RIR-LP exact checker 和 residual cache 均通过验收后，才在 `simplify.h/.cc` 增加 `adaptiveK()`。保留变量→系数→约束和 CS→GCD→RoundingSat cardinality normalization；K 只选择已经验收的 BICP、Multi-row SC、SC-LP 等高成本增强路径，不关闭 UP/RV/Basic。与固定配置逐组消融，只报告普通 MC。
 
 ---
 
@@ -1231,4 +1276,4 @@ v1.0 所列四份缺失文档不再作为依据。
 5. 0E 已建立 `=` 两方向的递归层 group identity 与精确 `<=` 前端语义；这只是所有规则的输入基础，不代表任何后续简化规则已经 Equality-aware 验收。
 6. 本指南只保留已确定规则，不把未提供的研究候选清单写成实现承诺。
 
-**最终验收标准**：每项技术先有独立且获批的伪代码文档；关卡 0B/0E 先让普通 MC oracle、三种 operator、EqualityGroup、模式拒绝与 sanitizer 基线通过；随后每条规则独立 on/off 的 `>=/<=/=` 模型集合与 oracle 一致；BICP 双向共享结果且完整恢复假设 trail/Reason；Multi-row SC/SC-LP 一次只提交一个系数且 helper 依赖有效；非根赋值有合法且生命周期安全的 Reason，EqualityGroup/Residual/ComponentManager/solver 在任意恢复路径一致；只有全局逻辑后果的 learned row 可保持 solver-only；Bypass 安全，residual cache 不 false hit；GLPK 只产生候选，最终变化通过 RoundingSat exact checker；RoundingSat cardinality conversion 只作为既有规范化能力接入；所有算法规则集中在 `simplify.h/.cc`、使用短方法名、沿用共有数据结构、只增加必要接口与统计；Adaptive K 最后加入且不覆盖规则本身。
+**最终验收标准**：每项技术完成后均把真实接口、测试、限制与下一停止点同步到本指南；关卡 0B/0E 先让普通 MC oracle、三种 operator、EqualityGroup、模式拒绝与 sanitizer 基线通过；随后每条规则独立 on/off 的 `>=/<=/=` 模型集合与 oracle 一致；BICP 双向共享结果且完整恢复假设 trail/Reason；Multi-row SC/SC-LP 一次只提交一个系数且 helper 依赖有效；非根赋值有合法且生命周期安全的 Reason，EqualityGroup/Residual/ComponentManager/solver 在任意恢复路径一致；只有全局逻辑后果的 learned row 可保持 solver-only；Bypass 安全，residual cache 不 false hit；GLPK 只产生候选，最终变化通过 RoundingSat exact checker；RoundingSat cardinality conversion 只作为既有规范化能力接入；所有算法规则集中在 `simplify.h/.cc`、使用短方法名、沿用共有数据结构、只增加必要接口与统计；Adaptive K 最后加入且不覆盖规则本身。

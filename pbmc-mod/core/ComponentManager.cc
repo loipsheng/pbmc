@@ -5,6 +5,7 @@ Use of this source code is governed by an MIT-style license that can be found in
 */
 
 #include "core/Component.h"
+#include "core/simplify.h"
 #include "mtl/Sort.h"
 #include <utility>
 #include <limits.h>
@@ -19,6 +20,7 @@ using namespace GPMC;
 
 template <typename T_data>
 void ComponentManager<T_data>::init(int nvars, int npvars, const vec<CRef>& sclauses, const ClauseAllocator& sca){
+	simp_rows_ = nullptr;
 	vec< vec<Var> > binlinks(nvars);
 	vec< vec<ClID> > occ(nvars);
 
@@ -87,7 +89,8 @@ void ComponentManager<T_data>::init(int nvars, int npvars, const vec<CRef>& scla
 template <typename T_data>
 void ComponentManager<T_data>::init(int nvars, int npvars,
 		const vector<rs::CRef>& sconstraints, const rs::ConstraintAllocator& sca,
-		const vector<RowInfo>& rows) {
+		const vector<RowInfo>& rows, const SimpRows* simp_rows) {
+	simp_rows_ = simp_rows;
 	vec< vec<Var> > binlinks(nvars);
 	vec< vec<ClID> > occ(nvars); // using clid here because rs::ID is unsigned and we use negative values as seperator values
 	unordered_map<uint64_t, RowVersionID> versions;
@@ -215,6 +218,43 @@ bool ComponentManager<T_data>::validRowBind(
 }
 
 template <typename T_data>
+bool ComponentManager<T_data>::effectiveRow(ClID clid,
+		vector<pair<rs::Lit, rs::BigCoef>>& terms, rs::BigVal& degree) const {
+	if (clid < 0 || static_cast<size_t>(clid) >= constraints_.size() ||
+			static_cast<size_t>(clid) >= clid_binds_.size())
+		throw logic_error("invalid component row");
+	terms.clear();
+
+	const ComponentBind& binding = clid_binds_[clid];
+	const SimpRow* changed = binding.version == NO_ROW_VERSION || simp_rows_ == nullptr
+			? nullptr : simp_rows_->find(binding.version);
+	if (changed != nullptr) {
+		if (config.cacheMode == CacheMode::LEGACY)
+			throw logic_error("legacy cache cannot consume a residual overlay");
+		if (changed->group != binding.group || changed->side != binding.side)
+			throw logic_error("overlay row identity disagrees with ComponentManager");
+		if (!changed->active) return false;
+		degree = rs::BigVal(changed->content.rhs);
+		terms.reserve(changed->content.lits.size());
+		for (size_t i = 0; i < changed->content.lits.size(); ++i) {
+			const rs::Lit literal = static_cast<rs::Lit>(changed->content.lits[i]);
+			const rs::BigCoef coefficient(changed->content.coeffs[i]);
+			if (literal == 0 || coefficient <= 0)
+				throw logic_error("overlay contains a non-canonical PB term");
+			terms.emplace_back(literal, coefficient);
+		}
+		return true;
+	}
+
+	const rs::Constr& constraint = pbca_[constraints_[clid]];
+	degree = constraint.degree();
+	terms.reserve(constraint.size());
+	for (size_t i = 0; i < constraint.size(); ++i)
+		terms.emplace_back(constraint.lit(i), constraint.coef(i));
+	return true;
+}
+
+template <typename T_data>
 ReferenceKey ComponentManager<T_data>::referenceKey(
 		Component& component, const vec<lbool>& assigns) const {
 	struct ResidualRow {
@@ -266,20 +306,23 @@ ReferenceKey ComponentManager<T_data>::referenceKey(
 		if (clid < 0 || static_cast<size_t>(clid) >= constraints_.size())
 			throw logic_error("residual key found an invalid component row");
 
-		const rs::Constr& constraint = pbca_[constraints_[clid]];
-		rs::BigVal gap = constraint.degree();
+		vector<pair<rs::Lit, rs::BigCoef>> effective;
+		rs::BigVal gap = 0;
+		if (!effectiveRow(clid, effective, gap)) return result;
 		vector<pair<int64_t, rs::BigCoef>> terms;
-		terms.reserve(constraint.size());
-		for (size_t i = 0; i < constraint.size(); ++i) {
-			const rs::Lit literal = constraint.lit(i);
+		terms.reserve(effective.size());
+		for (const auto& term : effective) {
+			const rs::Lit literal = term.first;
 			const Var variable = rs::toVar(literal) - 1;
+			if (variable < 0 || variable >= assigns.size())
+				throw logic_error("residual row contains an invalid variable");
 			const lbool assigned = value(variable, assigns);
 			const bool literal_true =
 					assigned != l_Undef &&
 					((literal > 0 && assigned == l_True) ||
 					 (literal < 0 && assigned == l_False));
 			if (literal_true) {
-				gap -= constraint.coef(i);
+				gap -= term.second;
 			} else if (assigned == l_Undef) {
 				auto position = local.find(variable);
 				if (position == local.end())
@@ -287,7 +330,7 @@ ReferenceKey ComponentManager<T_data>::referenceKey(
 				const int64_t signed_local = literal > 0
 						? static_cast<int64_t>(position->second + 1)
 						: -static_cast<int64_t>(position->second + 1);
-				terms.emplace_back(signed_local, constraint.coef(i));
+				terms.emplace_back(signed_local, term.second);
 			}
 		}
 		if (gap <= 0) return result;
@@ -513,8 +556,6 @@ int ComponentManager<T_data>::splitComponent(const vec<lbool>& assigns, const ve
 template <class T_data>
 void ComponentManager<T_data>::searchComponent(Var seed_var, const vec<lbool>& assigns, int& nvars_in_comp, int& ncls_in_comp){
 	vec<Var> vars_in_comp;
-	long mincoef_idx = -1; //storing index of unassigned var with min coeff for gap saturation
-	rs::BigVal gap;
 
 	ncls_in_comp = 0;
 	vars_in_comp.push(seed_var);
@@ -535,62 +576,66 @@ void ComponentManager<T_data>::searchComponent(Var seed_var, const vec<lbool>& a
 			}
 		}
 
-		int nlits;
 		for(++q; (c = occ_pool_[q]) != clid_Undef; q++) {
 			if(clseen_[c] == SC_CANDIDATE) {
-				rs::CRef cref = constraints_[c];
-				const rs::Constr& C = pbca_[cref];
-				gap = C.degree();
-				int before = vars_in_comp.size();
-				nlits = 0;
-				mincoef_idx = -1; //storing index of unassigned var with min coeff for gap saturation
-				for(int i = 0; i < C.size(); i++) {
-					if (C.lit(i) > 0) {
-						if (assigns[rs::toVar(C.lit(i)) - 1] == l_False) continue;
-						else if (assigns[rs::toVar(C.lit(i)) - 1] == l_True) gap -= C.coef(i);
-						else mincoef_idx = i;
-					} else {
-						if (assigns[rs::toVar(C.lit(i)) - 1] == l_True) continue;
-						else if (assigns[rs::toVar(C.lit(i)) - 1] == l_False) gap -= C.coef(i);
-						else mincoef_idx = i;
-					}
-					if ( gap <= 0 ){
-						while(before < vars_in_comp.size()){
-							varseen_[vars_in_comp.last()] = SC_CANDIDATE;
-							vars_in_comp.pop();
-						}
-						clseen_[c] = SC_NOT_CANDIDATE;
-						for(int j = 0; j < i; j++) {
-							if(var_frequency_[rs::toVar(C.lit(j)) - 1] > 0)
-								var_frequency_[rs::toVar(C.lit(j)) - 1]--;
-						}
-						goto NEXT;
-					}
-					else {
-						v2 = rs::toVar(C.lit(i)) - 1;
-						if (varseen_[v2] == SC_NOT_CANDIDATE){
-							continue;
-						}
-						assert(value(v2,assigns)==l_Undef);
-						nlits++;
-						var_frequency_[v2]++;
-						if(varseen_[v2] == SC_CANDIDATE){
-							varseen_[v2] = SC_SEEN;
-							vars_in_comp.push(v2);
-						}
+				vector<pair<rs::Lit, rs::BigCoef>> effective;
+				rs::BigVal gap = 0;
+				if (!effectiveRow(c, effective, gap)) {
+					clseen_[c] = SC_NOT_CANDIDATE;
+					continue;
+				}
+
+				vector<pair<Var, rs::BigCoef>> unassigned;
+				unassigned.reserve(effective.size());
+				rs::BigVal available = 0;
+				rs::BigCoef min_coefficient = 0;
+				bool contains_seed = false;
+				for (const auto& term : effective) {
+					const rs::Lit literal = term.first;
+					v2 = rs::toVar(literal) - 1;
+					if (v2 < 0 || v2 >= assigns.size())
+						throw logic_error("component row contains an invalid variable");
+					const lbool assigned = value(v2, assigns);
+					const bool literal_true = assigned != l_Undef &&
+							((literal > 0 && assigned == l_True) ||
+							 (literal < 0 && assigned == l_False));
+					if (literal_true) {
+						gap -= term.second;
+					} else if (assigned == l_Undef) {
+						unassigned.emplace_back(v2, term.second);
+						available += term.second;
+						if (min_coefficient == 0 || term.second < min_coefficient)
+							min_coefficient = term.second;
+						if (v2 == v1) contains_seed = true;
 					}
 				}
-				if (gap < C.coef(mincoef_idx)) gap = C.coef(mincoef_idx); // gap saturation
+				if (gap <= 0) {
+					clseen_[c] = SC_NOT_CANDIDATE;
+					continue;
+				}
+				if (available < gap)
+					throw logic_error("component traversal reached a residual conflict");
+				if (!contains_seed) continue;
+
+				for (const auto& term : unassigned) {
+					v2 = term.first;
+					if (varseen_[v2] == SC_NOT_CANDIDATE) continue;
+					assert(value(v2, assigns) == l_Undef);
+					var_frequency_[v2]++;
+					if (varseen_[v2] == SC_CANDIDATE) {
+						varseen_[v2] = SC_SEEN;
+						vars_in_comp.push(v2);
+					}
+				}
+				if (gap < min_coefficient) gap = min_coefficient;
 				if (gap < INT_MAX) {
 					gaps_[c] = gap.convert_to<int>();
 				} else {
-					cout << "component manager gap exceeds int size" << endl;
-					exit(1);
+					throw logic_error("component manager gap exceeds int size");
 				}
 				clseen_[c] = SC_SEEN;
 				ncls_in_comp++;
 			}
-			NEXT:;
 		}
 	}
 

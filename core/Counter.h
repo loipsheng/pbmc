@@ -73,6 +73,7 @@ public:
 	void copyPBInsNPVar();			// Copying parsed number of PB variables to counter internal settings
 	void copyPBInsPhase();			// copying optimal phase for each pb variable from pbins (phase defaults to assignment that subtracts coefficient from slack)
 	bool addRows();					// Direct exact import of canonical PB rows into RoundingSat
+	void backjumpTo(int level);		// RoundingSat rollback plus simplification undo
 
 	// Data members
 	//
@@ -174,6 +175,7 @@ protected:
 	ComponentManager<T_data> cmpmgr;	// The manger for processing components
 	vector<RowInfo> rows_;
 	vector<EqGroup> groups_;
+	SimpRows simp_rows_;
 	vec<vec<int>> occ_lists;
 
 	vec<rs::Lit> unitcls;			// The list of learnt unit clauses

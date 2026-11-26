@@ -21,7 +21,7 @@ public:
 		copyPBInsPhase();
 		if (!addRows()) return false;
 		import();
-		cmpmgr.init(nVars(), nPVars(), constraints, ca, rows_);
+		cmpmgr.init(nVars(), nPVars(), constraints, ca, rows_, &simp_rows_);
 		validateRows(true);
 		return true;
 	}
@@ -35,6 +35,89 @@ public:
 		decide(literal);
 		if (runPropagationWithoutLearnt(true)) return {};
 		return key();
+	}
+
+	bool setSingle(size_t index, PBconstraint content, bool active) {
+		if (index >= rows_.size() || rows_[index].group != NO_EQUALITY_GROUP)
+			return false;
+		return simp_rows_.set(rows_[index], content, active, decisionLevel());
+	}
+
+	bool setEquality(PBconstraint lower, PBconstraint upper) {
+		if (groups_.size() != 1) return false;
+		return simp_rows_.setGroup(
+				groups_.front(), lower, true, upper, true, decisionLevel());
+	}
+
+	const PBconstraint& row(size_t index) const { return rows_.at(index).content; }
+	const EqGroup& group() const { return groups_.front(); }
+
+	PBconstraint groupRow(RowVersionID version) const {
+		for (const RowInfo& row : rows_)
+			if (row.version == version) return row.content;
+		return {};
+	}
+
+	int split() {
+		syncAssign();
+		return cmpmgr.splitComponent(assigns);
+	}
+
+	bool scopedRestore() {
+		const GPMC::ReferenceKey before = key();
+		decide(1);
+		PBconstraint changed = rows_.front().content;
+		changed.coeffs.front()++;
+		if (!simp_rows_.set(rows_.front(), changed, true, decisionLevel()))
+			return false;
+		backjumpTo(0);
+		return key() == before;
+	}
+
+	bool cacheSnapshot() {
+		if (rows_.size() != 1) return false;
+		syncAssign();
+		GPMC::ComponentCache<mpz_class>& cache = cmpmgr.cache();
+		if (!cache.residual()) return false;
+		GPMC::Component& component = cmpmgr.topComponent();
+		const GPMC::CacheEntryID root = component.id();
+		if (root == 0 || !cache.entry(root).hasPendingKey() ||
+				cache.entry(root).hasCompactKey() || cache.templateReferences() != 0)
+			return false;
+
+		PBconstraint changed = rows_.front().content;
+		changed.coeffs.front()++;
+		if (!simp_rows_.set(rows_.front(), changed, true, 0)) return false;
+		cmpmgr.cacheModelCountOf(root, mpz_class(7), UNDEF_NODE);
+		if (cache.entry(root).hasPendingKey() ||
+				!cache.entry(root).hasCompactKey() || cache.templateReferences() != 1)
+			return false;
+
+		auto lookup = [&](bool expected) {
+			const GPMC::CacheEntryID temporary = cache.createEntryFor(
+					component, 0, cmpmgr, assigns);
+			component.set_id(temporary);
+			mpz_class count = 0;
+			NodeIndex node = UNDEF_NODE;
+			const bool hit = cache.requestValueOf(component, count, node);
+			component.set_id(root);
+			cache.eraseEntry(temporary);
+			return hit == expected && (!hit || count == 7) &&
+					cache.templateReferences() == 1;
+		};
+		if (!lookup(false)) return false;
+
+		if (!simp_rows_.set(rows_.front(), rows_.front().content, true, 0))
+			return false;
+		if (!lookup(true)) return false;
+
+		bool duplicate_store_rejected = false;
+		try {
+			cmpmgr.cacheModelCountOf(root, mpz_class(7), UNDEF_NODE);
+		} catch (const std::logic_error&) {
+			duplicate_store_rejected = true;
+		}
+		return duplicate_store_rejected && cache.templateReferences() == 1;
 	}
 };
 
@@ -118,5 +201,72 @@ int main() {
 	if (templates.probe(template_a) != 0 || templates.probe(template_b) != 0 ||
 			templates.reclaimed() != 2)
 		return 12;
+
+	ReferenceCounter overlay(config);
+	overlay.init();
+	if (!overlay.prepare(ordered)) return 13;
+	const GPMC::ReferenceKey frozen = overlay.key();
+	PBconstraint changed = overlay.row(0);
+	changed.coeffs.front()++;
+	if (!overlay.setSingle(0, changed, true) || overlay.key() == frozen)
+		return 14;
+
+	ReferenceCounter equality_overlay(config);
+	equality_overlay.init();
+	if (!equality_overlay.prepare(
+			"* #variable= 2 #constraint= 1\n"
+			"+1 x1 +1 x2 = 1 ;\n"))
+		return 15;
+	const GPMC::ReferenceKey equality_frozen = equality_overlay.key();
+	const EqGroup& eq = equality_overlay.group();
+	PBconstraint low = equality_overlay.groupRow(eq.lower);
+	PBconstraint high = equality_overlay.groupRow(eq.upper);
+	low.coeffs.front()++;
+	if (!equality_overlay.setEquality(low, high) ||
+			equality_overlay.key() == equality_frozen)
+		return 16;
+
+	const std::string bridge =
+			"* #variable= 4 #constraint= 3\n"
+			"+1 x1 +1 x2 >= 1 ;\n"
+			"+1 x3 +1 x4 >= 1 ;\n"
+			"+1 x2 +1 x3 >= 1 ;\n";
+	ReferenceCounter connected(config);
+	connected.init();
+	if (!connected.prepare(bridge) || connected.split() != 1) return 17;
+	ReferenceCounter separated(config);
+	separated.init();
+	if (!separated.prepare(bridge) ||
+			!separated.setSingle(2, separated.row(2), false) ||
+			separated.split() != 2)
+		return 18;
+
+	ReferenceCounter scoped(config);
+	scoped.init();
+	if (!scoped.prepare(ordered) || !scoped.scopedRestore()) return 19;
+
+	GPMC::Configuration legacy_config;
+	legacy_config.cntr.inprocess = true;
+	legacy_config.cm.cacheMode = GPMC::CacheMode::LEGACY;
+	ReferenceCounter legacy_overlay(legacy_config);
+	legacy_overlay.init();
+	if (!legacy_overlay.prepare(ordered)) return 20;
+	PBconstraint legacy_change = legacy_overlay.row(0);
+	legacy_change.coeffs.front()++;
+	if (!legacy_overlay.setSingle(0, legacy_change, true)) return 21;
+	bool legacy_rejected = false;
+	try {
+		legacy_overlay.key();
+	} catch (const std::logic_error&) {
+		legacy_rejected = true;
+	}
+	if (!legacy_rejected) return 22;
+
+	GPMC::Configuration residual_config;
+	residual_config.cntr.inprocess = true;
+	residual_config.cm.cacheMode = GPMC::CacheMode::RESIDUAL;
+	ReferenceCounter snapshot(residual_config);
+	snapshot.init();
+	if (!snapshot.prepare(ordered) || !snapshot.cacheSnapshot()) return 23;
 	return 0;
 }

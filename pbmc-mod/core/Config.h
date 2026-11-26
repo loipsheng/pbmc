@@ -21,7 +21,11 @@ enum class CacheMode : std::uint8_t {
 
 enum class SimpRule : std::uint8_t {
 	BASIC = 1,
-	BICP = 2
+	BICP = 2,
+	CS = 3,
+	SC = 4,
+	GCD = 5,
+	CARD = 6
 };
 
 struct ConfigCounter {

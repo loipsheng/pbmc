@@ -97,6 +97,10 @@ GPMC::Configuration bicpConfig() {
 	GPMC::Configuration config;
 	config.cntr.inprocess = true;
 	config.cntr.ablation.insert(GPMC::SimpRule::BASIC);
+	config.cntr.ablation.insert(GPMC::SimpRule::CS);
+	config.cntr.ablation.insert(GPMC::SimpRule::GCD);
+	config.cntr.ablation.insert(GPMC::SimpRule::CARD);
+	config.cntr.ablation.insert(GPMC::SimpRule::SC);
 	return config;
 }
 
